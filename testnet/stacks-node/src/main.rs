@@ -411,7 +411,7 @@ fn main() {
     debug!("node configuration {:?}", &conf.node);
     debug!("burnchain configuration {:?}", &conf.burnchain);
     debug!("connection configuration {:?}", &conf.connection_options);
-
+    debug!("Hello World");
     let num_round: u64 = 0; // Infinite number of rounds
 
     if conf.burnchain.mode == "helium" || conf.burnchain.mode == "mocknet" {
