@@ -65,4 +65,6 @@ fn main() {
     if !is_working_tree_clean() {
         println!("cargo:rustc-env=GIT_TREE_CLEAN=+");
     }
+
+// spurious comment
 }
