@@ -31,6 +31,7 @@ use crate::v0::tests::TEST_SKIP_SIGNER_CLEANUP;
 use crate::Signer as SignerTrait;
 
 #[derive(thiserror::Error, Debug)]
+#[allow(clippy::large_enum_variant)]
 /// Configuration error type
 pub enum ConfigurationError {
     /// Error occurred while fetching data from the stacks node
@@ -56,6 +57,8 @@ pub struct StateInfo {
     /// The local state machines for the running signers
     ///  as a pair of (reward-cycle, state-machine)
     pub signer_state_machines: Vec<(u64, Option<LocalStateMachine>)>,
+    /// The number of pending block proposals for this signer
+    pub pending_proposals_count: u64,
 }
 
 /// The signer result that can be sent across threads
@@ -320,6 +323,7 @@ impl<Signer: SignerTrait<T>, T: StacksMessageCodec + Clone + Send + Debug> RunLo
             tenure_idle_timeout_buffer: self.config.tenure_idle_timeout_buffer,
             block_proposal_max_age_secs: self.config.block_proposal_max_age_secs,
             reorg_attempts_activity_timeout: self.config.reorg_attempts_activity_timeout,
+            proposal_wait_for_parent_time: self.config.proposal_wait_for_parent_time,
         }))
     }
 
@@ -466,9 +470,15 @@ impl<Signer: SignerTrait<T>, T: StacksMessageCodec + Clone + Send + Debug> RunLo
                 // We are either the current or a future reward cycle, so we are not stale.
                 continue;
             }
-            if let ConfiguredSigner::RegisteredSigner(signer) = signer {
-                if !signer.has_unprocessed_blocks() {
-                    debug!("{signer}: Signer's tenure has completed.");
+            match signer {
+                ConfiguredSigner::RegisteredSigner(signer) => {
+                    if !signer.has_unprocessed_blocks() {
+                        debug!("{signer}: Signer's tenure has completed.");
+                        to_delete.push(*idx);
+                    }
+                }
+                ConfiguredSigner::NotRegistered { .. } => {
+                    debug!("{signer}: Unregistered signer's tenure has completed.");
                     to_delete.push(*idx);
                 }
             }
@@ -523,6 +533,17 @@ impl<Signer: SignerTrait<T>, T: StacksMessageCodec + Clone + Send + Debug>
                         )
                     })
                     .collect(),
+                pending_proposals_count: self
+                    .stacks_signers
+                    .values()
+                    .find_map(|signer| {
+                        if let ConfiguredSigner::RegisteredSigner(signer) = signer {
+                            Some(signer.get_pending_proposals_count())
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or(0),
             };
             info!("Signer status check requested: {state_info:?}");
 
