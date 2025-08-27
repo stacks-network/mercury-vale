@@ -15,42 +15,28 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use std::collections::{HashMap, HashSet};
-use std::io::prelude::*;
-use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
-use std::{fmt, fs, io};
 
-use clarity::vm::analysis::run_analysis;
 use clarity::vm::analysis::types::ContractAnalysis;
 use clarity::vm::ast::errors::ParseErrors;
 use clarity::vm::ast::ASTRules;
 use clarity::vm::clarity::TransactionConnection;
 use clarity::vm::contexts::{AssetMap, AssetMapEntry, Environment};
-use clarity::vm::contracts::Contract;
 use clarity::vm::costs::cost_functions::ClarityCostFunction;
-use clarity::vm::costs::{cost_functions, runtime_cost, CostTracker, ExecutionCost};
-use clarity::vm::database::{ClarityBackingStore, ClarityDatabase};
+use clarity::vm::costs::{runtime_cost, CostTracker, ExecutionCost};
 use clarity::vm::errors::Error as InterpreterError;
-use clarity::vm::representations::{ClarityName, ContractName};
-use clarity::vm::types::serialization::SerializationError as ClaritySerializationError;
+use clarity::vm::representations::ClarityName;
 use clarity::vm::types::{
     AssetIdentifier, BuffData, PrincipalData, QualifiedContractIdentifier, SequenceData,
     StacksAddressExtensions as ClarityStacksAddressExt, StandardPrincipalData, TupleData,
     TypeSignature, Value,
 };
-use stacks_common::util::hash::to_hex;
 
-use crate::chainstate::burn::db::sortdb::*;
-use crate::chainstate::nakamoto::NakamotoChainState;
 use crate::chainstate::stacks::db::*;
-use crate::chainstate::stacks::{Error, StacksMicroblockHeader, *};
+use crate::chainstate::stacks::{Error, StacksMicroblockHeader};
 use crate::clarity_vm::clarity::{
-    ClarityBlockConnection, ClarityConnection, ClarityInstance, ClarityTransactionConnection,
-    Error as clarity_error,
+    ClarityConnection, ClarityTransactionConnection, Error as clarity_error,
 };
-use crate::net::Error as net_error;
-use crate::util_lib::db::{query_count, query_rows, DBConn, Error as db_error};
-use crate::util_lib::strings::{StacksString, VecDisplay};
+use crate::util_lib::strings::VecDisplay;
 
 /// This is a safe-to-hash Clarity value
 #[derive(PartialEq, Eq)]
@@ -107,6 +93,7 @@ impl StacksTransactionReceipt {
         result: Value,
         burned: u128,
         cost: ExecutionCost,
+        vm_error: Option<String>,
     ) -> StacksTransactionReceipt {
         StacksTransactionReceipt {
             transaction: tx.into(),
@@ -118,7 +105,7 @@ impl StacksTransactionReceipt {
             execution_cost: cost,
             microblock_header: None,
             tx_index: 0,
-            vm_error: None,
+            vm_error,
         }
     }
 
@@ -128,6 +115,7 @@ impl StacksTransactionReceipt {
         result: Value,
         burned: u128,
         cost: ExecutionCost,
+        reason: String,
     ) -> StacksTransactionReceipt {
         StacksTransactionReceipt {
             transaction: tx.into(),
@@ -139,7 +127,7 @@ impl StacksTransactionReceipt {
             execution_cost: cost,
             microblock_header: None,
             tx_index: 0,
-            vm_error: None,
+            vm_error: Some(reason),
         }
     }
 
@@ -170,6 +158,7 @@ impl StacksTransactionReceipt {
         burned: u128,
         analysis: ContractAnalysis,
         cost: ExecutionCost,
+        reason: String,
     ) -> StacksTransactionReceipt {
         StacksTransactionReceipt {
             transaction: tx.into(),
@@ -181,7 +170,7 @@ impl StacksTransactionReceipt {
             execution_cost: cost,
             microblock_header: None,
             tx_index: 0,
-            vm_error: None,
+            vm_error: Some(reason),
         }
     }
 
@@ -277,7 +266,7 @@ impl StacksTransactionReceipt {
             execution_cost: cost,
             microblock_header: None,
             tx_index: 0,
-            vm_error: Some(format!("{}", &error)),
+            vm_error: Some(error.to_string()),
         }
     }
 
@@ -296,7 +285,7 @@ impl StacksTransactionReceipt {
             execution_cost: cost,
             microblock_header: None,
             tx_index: 0,
-            vm_error: Some(format!("{}", &error)),
+            vm_error: Some(error.to_string()),
         }
     }
 
@@ -367,7 +356,17 @@ pub enum ClarityRuntimeTxError {
         error: clarity_error,
         err_type: &'static str,
     },
-    AbortedByCallback(Option<Value>, AssetMap, Vec<StacksTransactionEvent>),
+    AbortedByCallback {
+        /// What the output value of the transaction would have been.
+        /// This will be a Some for contract-calls, and None for contract initialization txs.
+        output: Option<Value>,
+        /// The asset map which was evaluated by the abort callback
+        assets_modified: AssetMap,
+        /// The events from the transaction processing
+        tx_events: Vec<StacksTransactionEvent>,
+        /// A human-readable explanation for aborting the transaction
+        reason: String,
+    },
     CostError(ExecutionCost, ExecutionCost),
     AnalysisError(CheckErrors),
     Rejectable(clarity_error),
@@ -397,9 +396,17 @@ pub fn handle_clarity_runtime_error(error: clarity_error) -> ClarityRuntimeTxErr
                 ClarityRuntimeTxError::AnalysisError(check_error)
             }
         }
-        clarity_error::AbortedByCallback(val, assets, events) => {
-            ClarityRuntimeTxError::AbortedByCallback(val, assets, events)
-        }
+        clarity_error::AbortedByCallback {
+            output,
+            assets_modified,
+            tx_events,
+            reason,
+        } => ClarityRuntimeTxError::AbortedByCallback {
+            output,
+            assets_modified,
+            tx_events,
+            reason,
+        },
         clarity_error::CostError(cost, budget) => ClarityRuntimeTxError::CostError(cost, budget),
         unhandled_error => ClarityRuntimeTxError::Rejectable(unhandled_error),
     }
@@ -572,15 +579,16 @@ impl StacksChainState {
     }
 
     /// Apply a post-conditions check.
-    /// Return true if they all pass.
-    /// Return false if at least one fails.
+    /// Return `Ok(None)` if the check passes.
+    /// Return `Ok(Some(reason))` if the check fails.
+    /// Return `Err` if the check cannot be performed.
     fn check_transaction_postconditions(
         post_conditions: &[TransactionPostCondition],
         post_condition_mode: &TransactionPostConditionMode,
         origin_account: &StacksAccount,
         asset_map: &AssetMap,
         txid: Txid,
-    ) -> Result<bool, InterpreterError> {
+    ) -> Result<Option<String>, InterpreterError> {
         let mut checked_fungible_assets: HashMap<PrincipalData, HashSet<AssetIdentifier>> =
             HashMap::new();
         let mut checked_nonfungible_assets: HashMap<
@@ -606,11 +614,11 @@ impl StacksChainState {
                         .expect("FATAL: sent waaaaay too much STX");
 
                     if !condition_code.check(u128::from(*amount_sent_condition), amount_sent) {
-                        info!(
-                            "Post-condition check failure on STX owned by {}: {:?} {:?} {}",
-                            account_principal, amount_sent_condition, condition_code, amount_sent; "txid" => %txid
+                        let reason = format!(
+                            "Post-condition check failure on STX owned by {account_principal}: {amount_sent_condition:?} {condition_code:?} {amount_sent}",
                         );
-                        return Ok(false);
+                        info!("{reason}"; "txid" => %txid);
+                        return Ok(Some(reason));
                     }
 
                     if let Some(ref mut asset_ids) =
@@ -652,8 +660,9 @@ impl StacksChainState {
                         .get_fungible_tokens(&account_principal, &asset_id)
                         .unwrap_or(0);
                     if !condition_code.check(u128::from(*amount_sent_condition), amount_sent) {
-                        info!("Post-condition check failure on fungible asset {} owned by {}: {} {:?} {}", &asset_id, account_principal, amount_sent_condition, condition_code, amount_sent; "txid" => %txid);
-                        return Ok(false);
+                        let reason = format!("Post-condition check failure on fungible asset {asset_id} owned by {account_principal}: {amount_sent_condition} {condition_code:?} {amount_sent}");
+                        info!("{reason}"; "txid" => %txid);
+                        return Ok(Some(reason));
                     }
 
                     if let Some(ref mut asset_ids) =
@@ -686,8 +695,11 @@ impl StacksChainState {
                         .get_nonfungible_tokens(&account_principal, &asset_id)
                         .unwrap_or(&empty_assets);
                     if !condition_code.check(asset_value, assets_sent) {
-                        info!("Post-condition check failure on non-fungible asset {} owned by {}: {:?} {:?}", &asset_id, account_principal, &asset_value, condition_code; "txid" => %txid);
-                        return Ok(false);
+                        let reason = format!(
+                            "Post-condition check failure on non-fungible asset {asset_id} owned by {account_principal}: {asset_value:?} {condition_code:?} {assets_sent:?}"
+                        );
+                        info!("{reason}"; "txid" => %txid);
+                        return Ok(Some(reason));
                     }
 
                     if let Some(ref mut asset_id_map) =
@@ -727,19 +739,28 @@ impl StacksChainState {
                                     // each value must be covered
                                     for v in values {
                                         if !nfts.contains(&v.clone().try_into()?) {
-                                            info!("Post-condition check failure: Non-fungible asset {} value {:?} was moved by {} but not checked", &asset_identifier, &v, &principal; "txid" => %txid);
-                                            return Ok(false);
+                                            let reason = format!(
+                                                "Post-condition check failure: Non-fungible asset {asset_identifier} value {v:?} was moved by {principal} but not checked"
+                                            );
+                                            info!("{reason}"; "txid" => %txid);
+                                            return Ok(Some(reason));
                                         }
                                     }
                                 } else {
                                     // no values covered
-                                    info!("Post-condition check failure: No checks for non-fungible asset type {} moved by {}", &asset_identifier, &principal; "txid" => %txid);
-                                    return Ok(false);
+                                    let reason = format!(
+                                        "Post-condition check failure: Non-fungible asset {asset_identifier} was moved by {principal} but not checked"
+                                    );
+                                    info!("{reason}"; "txid" => %txid);
+                                    return Ok(Some(reason));
                                 }
                             } else {
                                 // no NFT for this principal
-                                info!("Post-condition check failure: No checks for any non-fungible assets, but moved {} by {}", &asset_identifier, &principal; "txid" => %txid);
-                                return Ok(false);
+                                let reason = format!(
+                                    "Post-condition check failure: No checks for non-fungible asset {asset_identifier} moved by {principal}"
+                                );
+                                info!("{reason}"; "txid" => %txid);
+                                return Ok(Some(reason));
                             }
                         }
                         _ => {
@@ -748,19 +769,25 @@ impl StacksChainState {
                                 checked_fungible_assets.get(&principal)
                             {
                                 if !checked_ft_asset_ids.contains(&asset_identifier) {
-                                    info!("Post-condition check failure: checks did not cover transfer of {} by {}", &asset_identifier, &principal; "txid" => %txid);
-                                    return Ok(false);
+                                    let reason = format!(
+                                        "Post-condition check failure: Fungible asset {asset_identifier} was moved by {principal} but not checked"
+                                    );
+                                    info!("{reason}"; "txid" => %txid);
+                                    return Ok(Some(reason));
                                 }
                             } else {
-                                info!("Post-condition check failure: No checks for fungible token type {} moved by {}", &asset_identifier, &principal; "txid" => %txid);
-                                return Ok(false);
+                                let reason = format!(
+                                    "Post-condition check failure: Fungible asset {asset_identifier} was moved by {principal} but not checked"
+                                );
+                                info!("{reason}"; "txid" => %txid);
+                                return Ok(Some(reason));
                             }
                         }
                     }
                 }
             }
         }
-        return Ok(true);
+        return Ok(None);
     }
 
     /// Given two microblock headers, were they signed by the same key?
@@ -974,6 +1001,7 @@ impl StacksChainState {
         tx: &StacksTransaction,
         origin_account: &StacksAccount,
         ast_rules: ASTRules,
+        max_execution_time: Option<std::time::Duration>,
     ) -> Result<StacksTransactionReceipt, Error> {
         match tx.payload {
             TransactionPayload::TokenTransfer(ref addr, ref amount, ref memo) => {
@@ -1035,7 +1063,7 @@ impl StacksChainState {
                     &contract_call.function_name,
                     &contract_call.function_args,
                     |asset_map, _| {
-                        !StacksChainState::check_transaction_postconditions(
+                        StacksChainState::check_transaction_postconditions(
                             &tx.post_conditions,
                             &tx.post_condition_mode,
                             origin_account,
@@ -1044,6 +1072,7 @@ impl StacksChainState {
                         )
                         .expect("FATAL: error while evaluating post-conditions")
                     },
+                    max_execution_time,
                 );
 
                 let mut total_cost = clarity_tx.cost_so_far();
@@ -1051,7 +1080,7 @@ impl StacksChainState {
                     .sub(&cost_before)
                     .expect("BUG: total block cost decreased");
 
-                let (result, asset_map, events) = match contract_call_resp {
+                let (result, asset_map, events, vm_error) = match contract_call_resp {
                     Ok((return_value, asset_map, events)) => {
                         info!("Contract-call successfully processed";
                               "txid" => %tx.txid(),
@@ -1062,7 +1091,7 @@ impl StacksChainState {
                               "function_args" => %VecDisplay(&contract_call.function_args),
                               "return_value" => %return_value,
                               "cost" => ?total_cost);
-                        (return_value, asset_map, events)
+                        (return_value, asset_map, events, None)
                     }
                     Err(e) => match handle_clarity_runtime_error(e) {
                         ClarityRuntimeTxError::Acceptable { error, err_type } => {
@@ -1074,9 +1103,19 @@ impl StacksChainState {
                                       "function_name" => %contract_call.function_name,
                                       "function_args" => %VecDisplay(&contract_call.function_args),
                                       "error" => ?error);
-                            (Value::err_none(), AssetMap::new(), vec![])
+                            (
+                                Value::err_none(),
+                                AssetMap::new(),
+                                vec![],
+                                Some(error.to_string()),
+                            )
                         }
-                        ClarityRuntimeTxError::AbortedByCallback(value, assets, events) => {
+                        ClarityRuntimeTxError::AbortedByCallback {
+                            output,
+                            assets_modified,
+                            tx_events,
+                            reason,
+                        } => {
                             info!("Contract-call aborted by post-condition";
                                       "txid" => %tx.txid(),
                                       "origin" => %origin_account.principal,
@@ -1086,10 +1125,12 @@ impl StacksChainState {
                                       "function_args" => %VecDisplay(&contract_call.function_args));
                             let receipt = StacksTransactionReceipt::from_condition_aborted_contract_call(
                                     tx.clone(),
-                                    events,
-                                    value.expect("BUG: Post condition contract call must provide would-have-been-returned value"),
-                                    assets.get_stx_burned_total()?,
-                                    total_cost);
+                                    tx_events,
+                                    output.expect("BUG: Post condition contract call must provide would-have-been-returned value"),
+                                    assets_modified.get_stx_burned_total()?,
+                                    total_cost,
+                                    reason,
+                                );
                             return Ok(receipt);
                         }
                         ClarityRuntimeTxError::CostError(cost_after, budget) => {
@@ -1151,6 +1192,7 @@ impl StacksChainState {
                     result,
                     asset_map.get_stx_burned_total()?,
                     total_cost,
+                    vm_error,
                 );
                 Ok(receipt)
             }
@@ -1271,7 +1313,7 @@ impl StacksChainState {
                     &contract_code_str,
                     sponsor,
                     |asset_map, _| {
-                        !StacksChainState::check_transaction_postconditions(
+                        StacksChainState::check_transaction_postconditions(
                             &tx.post_conditions,
                             &tx.post_condition_mode,
                             origin_account,
@@ -1280,6 +1322,7 @@ impl StacksChainState {
                         )
                         .expect("FATAL: error while evaluating post-conditions")
                     },
+                    max_execution_time,
                 );
 
                 let mut total_cost = clarity_tx.cost_so_far();
@@ -1319,14 +1362,20 @@ impl StacksChainState {
                             };
                             return Ok(receipt);
                         }
-                        ClarityRuntimeTxError::AbortedByCallback(_, assets, events) => {
+                        ClarityRuntimeTxError::AbortedByCallback {
+                            assets_modified,
+                            tx_events,
+                            reason,
+                            ..
+                        } => {
                             let receipt =
                                 StacksTransactionReceipt::from_condition_aborted_smart_contract(
                                     tx.clone(),
-                                    events,
-                                    assets.get_stx_burned_total()?,
+                                    tx_events,
+                                    assets_modified.get_stx_burned_total()?,
                                     contract_analysis,
                                     total_cost,
+                                    reason,
                                 );
                             return Ok(receipt);
                         }
@@ -1471,6 +1520,7 @@ impl StacksChainState {
         tx: &StacksTransaction,
         quiet: bool,
         ast_rules: ASTRules,
+        max_execution_time: Option<std::time::Duration>,
     ) -> Result<(u64, StacksTransactionReceipt), Error> {
         debug!("Process transaction {} ({})", tx.txid(), tx.payload.name());
         let epoch = clarity_block.get_epoch();
@@ -1509,6 +1559,7 @@ impl StacksChainState {
                 tx,
                 &origin_account,
                 ast_rules,
+                max_execution_time,
             )?;
 
             // update the account nonces
@@ -1537,6 +1588,7 @@ impl StacksChainState {
                 tx,
                 &origin_account,
                 ast_rules,
+                None,
             )?;
 
             let new_payer_account = StacksChainState::get_payer_account(&mut transaction, tx);
@@ -1569,8 +1621,7 @@ impl StacksChainState {
 
 #[cfg(test)]
 pub mod test {
-    use clarity::vm::clarity::TransactionConnection;
-    use clarity::vm::contracts::Contract;
+    use clarity::util::secp256k1::Secp256k1PrivateKey;
     use clarity::vm::representations::{ClarityName, ContractName};
     use clarity::vm::test_util::{UnitTestBurnStateDB, TEST_BURN_STATE_DB};
     use clarity::vm::tests::TEST_HEADER_DB;
@@ -1580,13 +1631,8 @@ pub mod test {
     use stacks_common::util::hash::*;
 
     use super::*;
-    use crate::burnchains::Address;
-    use crate::chainstate::stacks::boot::*;
     use crate::chainstate::stacks::db::test::*;
-    use crate::chainstate::stacks::index::storage::*;
-    use crate::chainstate::stacks::index::*;
     use crate::chainstate::stacks::{Error, *};
-    use crate::chainstate::*;
 
     pub const TestBurnStateDB_20: UnitTestBurnStateDB = UnitTestBurnStateDB {
         epoch_id: StacksEpochId::Epoch20,
@@ -1610,6 +1656,10 @@ pub mod test {
     };
     pub const TestBurnStateDB_31: UnitTestBurnStateDB = UnitTestBurnStateDB {
         epoch_id: StacksEpochId::Epoch31,
+        ast_rules: ASTRules::PrecheckSize,
+    };
+    pub const TestBurnStateDB_32: UnitTestBurnStateDB = UnitTestBurnStateDB {
+        epoch_id: StacksEpochId::Epoch32,
         ast_rules: ASTRules::PrecheckSize,
     };
 
@@ -1674,7 +1724,7 @@ pub mod test {
         );
 
         let mut tx_conn = next_block.start_transaction_processing();
-        let sk = secp256k1::Secp256k1PrivateKey::random();
+        let sk = Secp256k1PrivateKey::random();
 
         let tx = StacksTransaction {
             version: TransactionVersion::Testnet,
@@ -1700,6 +1750,7 @@ pub mod test {
                 stx_balance: STXBalance::Unlocked { amount: 100 },
             },
             ASTRules::PrecheckSize,
+            None,
         )
         .unwrap();
 
@@ -1764,6 +1815,7 @@ pub mod test {
                 &signed_tx,
                 false,
                 ASTRules::PrecheckSize,
+                None,
             )
             .unwrap();
 
@@ -1815,6 +1867,7 @@ pub mod test {
                 &signed_tx,
                 false,
                 ASTRules::PrecheckSize,
+                None,
             )
             .unwrap();
 
@@ -2009,6 +2062,7 @@ pub mod test {
                     &signed_tx,
                     false,
                     ASTRules::PrecheckSize,
+                    None,
                 );
                 if let Err(Error::InvalidStacksTransaction(msg, false)) = res {
                     assert!(msg.contains(&err_frag), "{err_frag}");
@@ -2099,6 +2153,7 @@ pub mod test {
                 &signed_tx,
                 false,
                 ASTRules::PrecheckSize,
+                None,
             )
             .unwrap();
 
@@ -2179,6 +2234,7 @@ pub mod test {
                 &signed_tx,
                 false,
                 ASTRules::PrecheckSize,
+                None,
             )
             .unwrap();
 
@@ -2273,6 +2329,7 @@ pub mod test {
                     &signed_tx,
                     false,
                     ASTRules::PrecheckSize,
+                    None,
                 );
                 if expected_behavior[i] {
                     assert!(res.is_ok());
@@ -2366,6 +2423,7 @@ pub mod test {
                     &signed_tx,
                     false,
                     ASTRules::PrecheckSize,
+                    None,
                 )
                 .unwrap();
 
@@ -2470,6 +2528,7 @@ pub mod test {
                     &signed_tx,
                     false,
                     ASTRules::PrecheckSize,
+                    None,
                 )
                 .unwrap();
 
@@ -2558,6 +2617,7 @@ pub mod test {
                 &signed_tx,
                 false,
                 ASTRules::PrecheckSize,
+                None,
             )
             .unwrap();
 
@@ -2671,6 +2731,7 @@ pub mod test {
                 &signed_tx,
                 false,
                 ASTRules::PrecheckSize,
+                None,
             )
             .unwrap();
 
@@ -2683,6 +2744,7 @@ pub mod test {
                 &signed_tx_2,
                 false,
                 ASTRules::PrecheckSize,
+                None,
             )
             .unwrap();
 
@@ -2805,6 +2867,7 @@ pub mod test {
                 &signed_tx,
                 false,
                 ASTRules::PrecheckSize,
+                None,
             )
             .unwrap();
 
@@ -2820,6 +2883,7 @@ pub mod test {
                 &signed_tx_2,
                 false,
                 ASTRules::PrecheckSize,
+                None,
             )
             .unwrap();
 
@@ -2895,6 +2959,7 @@ pub mod test {
                 &signed_tx,
                 false,
                 ASTRules::PrecheckSize,
+                None,
             )
             .unwrap();
 
@@ -2946,6 +3011,7 @@ pub mod test {
                     &signed_tx_2,
                     false,
                     ASTRules::PrecheckSize,
+                    None,
                 )
                 .unwrap();
 
@@ -3010,6 +3076,7 @@ pub mod test {
                 &signed_tx,
                 false,
                 ASTRules::PrecheckSize,
+                None,
             )
             .unwrap();
 
@@ -3115,6 +3182,7 @@ pub mod test {
                 &signed_tx,
                 false,
                 ASTRules::PrecheckSize,
+                None,
             )
             .unwrap();
 
@@ -3153,6 +3221,7 @@ pub mod test {
                     &signed_tx_2,
                     false,
                     ASTRules::PrecheckSize,
+                    None,
                 );
                 assert!(res.is_err());
 
@@ -3184,6 +3253,7 @@ pub mod test {
             &signed_tx,
             false,
             ASTRules::PrecheckSize,
+            None,
         )
         .unwrap();
 
@@ -3224,6 +3294,7 @@ pub mod test {
                 &signed_tx_2,
                 false,
                 ASTRules::PrecheckSize,
+                None,
             );
             assert!(res.is_ok());
 
@@ -3349,6 +3420,7 @@ pub mod test {
                 &signed_tx,
                 false,
                 ASTRules::PrecheckSize,
+                None,
             )
             .unwrap();
 
@@ -3365,6 +3437,7 @@ pub mod test {
                 &signed_tx_2,
                 false,
                 ASTRules::PrecheckSize,
+                None,
             )
             .unwrap();
 
@@ -3876,6 +3949,7 @@ pub mod test {
                 &signed_contract_tx,
                 false,
                 ASTRules::PrecheckSize,
+                None,
             )
             .unwrap();
 
@@ -3901,6 +3975,7 @@ pub mod test {
                     tx_pass,
                     false,
                     ASTRules::PrecheckSize,
+                    None,
                 )
                 .unwrap();
                 expected_stackaroos_balance += 100;
@@ -3931,6 +4006,7 @@ pub mod test {
                     tx_pass,
                     false,
                     ASTRules::PrecheckSize,
+                    None,
                 )
                 .unwrap();
                 expected_stackaroos_balance -= 100;
@@ -3978,6 +4054,7 @@ pub mod test {
                     tx_pass,
                     false,
                     ASTRules::PrecheckSize,
+                    None,
                 )
                 .unwrap();
                 expected_nonce += 1;
@@ -4008,6 +4085,7 @@ pub mod test {
                     tx_fail,
                     false,
                     ASTRules::PrecheckSize,
+                    None,
                 )
                 .unwrap();
                 expected_nonce += 1;
@@ -4051,6 +4129,7 @@ pub mod test {
                     tx_fail,
                     false,
                     ASTRules::PrecheckSize,
+                    None,
                 )
                 .unwrap();
                 expected_recv_nonce += 1;
@@ -4099,6 +4178,7 @@ pub mod test {
                     tx_fail,
                     false,
                     ASTRules::PrecheckSize,
+                    None,
                 )
                 .unwrap();
                 expected_nonce += 1;
@@ -4594,6 +4674,7 @@ pub mod test {
                 &signed_contract_tx,
                 false,
                 ASTRules::PrecheckSize,
+                None,
             )
             .unwrap();
 
@@ -4618,6 +4699,7 @@ pub mod test {
                     tx_pass,
                     false,
                     ASTRules::PrecheckSize,
+                    None,
                 )
                 .unwrap();
                 expected_stackaroos_balance += 100;
@@ -4665,6 +4747,7 @@ pub mod test {
                     tx_pass,
                     false,
                     ASTRules::PrecheckSize,
+                    None,
                 )
                 .unwrap();
                 expected_stackaroos_balance -= 100;
@@ -4731,6 +4814,7 @@ pub mod test {
                     tx_fail,
                     false,
                     ASTRules::PrecheckSize,
+                    None,
                 )
                 .unwrap();
                 expected_nonce += 1;
@@ -4789,6 +4873,7 @@ pub mod test {
                     tx_fail,
                     false,
                     ASTRules::PrecheckSize,
+                    None,
                 )
                 .unwrap();
                 expected_recv_nonce += 1;
@@ -4955,6 +5040,7 @@ pub mod test {
                 &signed_contract_tx,
                 false,
                 ASTRules::PrecheckSize,
+                None,
             )
             .unwrap();
 
@@ -4963,6 +5049,7 @@ pub mod test {
                 &contract_call_tx,
                 false,
                 ASTRules::PrecheckSize,
+                None,
             )
             .unwrap();
 
@@ -6819,7 +6906,8 @@ pub mod test {
             )
             .unwrap();
             assert_eq!(
-                result, expected_result,
+                result.is_none(),
+                expected_result,
                 "test failed:\nasset map: {ft_transfer_2:?}\nscenario: {test:?}"
             );
         }
@@ -7164,7 +7252,8 @@ pub mod test {
             )
             .unwrap();
             assert_eq!(
-                result, expected_result,
+                result.is_none(),
+                expected_result,
                 "test failed:\nasset map: {nft_transfer_2:?}\nscenario: {test:?}"
             );
         }
@@ -7976,7 +8065,8 @@ pub mod test {
                 )
                 .unwrap();
                 assert_eq!(
-                    result, expected_result,
+                    result.is_none(),
+                    expected_result,
                     "test failed:\nasset map: {asset_map:?}\nscenario: {test:?}"
                 );
             }
@@ -8059,6 +8149,7 @@ pub mod test {
                 &signed_contract_tx,
                 false,
                 ASTRules::PrecheckSize,
+                None,
             )
             .unwrap();
             let err = StacksChainState::process_transaction(
@@ -8066,6 +8157,7 @@ pub mod test {
                 &signed_contract_call_tx,
                 false,
                 ASTRules::PrecheckSize,
+                None,
             )
             .unwrap_err();
 
@@ -8090,6 +8182,7 @@ pub mod test {
             &signed_contract_tx,
             false,
             ASTRules::PrecheckSize,
+            None,
         )
         .unwrap();
         let (fee, _) = StacksChainState::process_transaction(
@@ -8097,6 +8190,7 @@ pub mod test {
             &signed_contract_call_tx,
             false,
             ASTRules::PrecheckSize,
+            None,
         )
         .unwrap();
 
@@ -8244,6 +8338,7 @@ pub mod test {
                 &signed_tx_poison_microblock,
                 false,
                 ASTRules::PrecheckSize,
+                None,
             )
             .unwrap();
 
@@ -8364,6 +8459,7 @@ pub mod test {
                 &signed_tx_poison_microblock,
                 false,
                 ASTRules::PrecheckSize,
+                None,
             )
             .unwrap_err();
             let Error::ClarityError(clarity_error::BadTransaction(msg)) = &err else {
@@ -8482,6 +8578,7 @@ pub mod test {
                 &signed_tx_poison_microblock_1,
                 false,
                 ASTRules::PrecheckSize,
+                None,
             )
             .unwrap();
 
@@ -8496,6 +8593,7 @@ pub mod test {
                 &signed_tx_poison_microblock_2,
                 false,
                 ASTRules::PrecheckSize,
+                None,
             )
             .unwrap();
 
@@ -8637,6 +8735,7 @@ pub mod test {
                     StacksEpochId::Epoch25 => self.get_stacks_epoch(6),
                     StacksEpochId::Epoch30 => self.get_stacks_epoch(7),
                     StacksEpochId::Epoch31 => self.get_stacks_epoch(8),
+                    StacksEpochId::Epoch32 => self.get_stacks_epoch(9),
                 }
             }
             fn get_pox_payout_addrs(
@@ -8761,6 +8860,7 @@ pub mod test {
             &smart_contract_v2,
             false,
             ASTRules::PrecheckSize,
+            None,
         ) {
             assert!(msg.find("not in Stacks epoch 2.1 or later").is_some());
         } else {
@@ -9053,6 +9153,7 @@ pub mod test {
             &signed_contract_tx,
             false,
             ASTRules::PrecheckSize,
+            None,
         )
         .unwrap();
         assert_eq!(fee, 0);
@@ -9062,6 +9163,7 @@ pub mod test {
             &signed_contract_call_tx,
             false,
             ASTRules::PrecheckSize,
+            None,
         )
         .unwrap();
         assert_eq!(fee, 1);
@@ -9081,6 +9183,7 @@ pub mod test {
             &signed_contract_tx,
             false,
             ASTRules::PrecheckSize,
+            None,
         )
         .unwrap();
         assert_eq!(fee, 0);
@@ -9090,6 +9193,7 @@ pub mod test {
             &signed_contract_call_tx,
             false,
             ASTRules::PrecheckSize,
+            None,
         )
         .unwrap();
         assert_eq!(fee, 1);
@@ -9109,6 +9213,7 @@ pub mod test {
             &signed_contract_tx,
             false,
             ASTRules::PrecheckSize,
+            None,
         )
         .unwrap();
         assert_eq!(fee, 0);
@@ -9118,6 +9223,7 @@ pub mod test {
             &signed_contract_call_tx,
             false,
             ASTRules::PrecheckSize,
+            None,
         )
         .unwrap_err();
         conn.commit_block();
@@ -9220,6 +9326,7 @@ pub mod test {
             &signed_contract_tx,
             false,
             ASTRules::PrecheckSize,
+            None,
         )
         .unwrap();
         assert_eq!(fee, 0);
@@ -9229,6 +9336,7 @@ pub mod test {
             &signed_contract_call_tx,
             false,
             ASTRules::PrecheckSize,
+            None,
         )
         .unwrap();
         assert_eq!(fee, 1);
@@ -9248,6 +9356,7 @@ pub mod test {
             &signed_contract_tx,
             false,
             ASTRules::PrecheckSize,
+            None,
         )
         .unwrap();
         assert_eq!(fee, 0);
@@ -9257,6 +9366,7 @@ pub mod test {
             &signed_contract_call_tx,
             false,
             ASTRules::PrecheckSize,
+            None,
         )
         .unwrap();
         assert_eq!(fee, 1);
@@ -9276,6 +9386,7 @@ pub mod test {
             &signed_contract_tx,
             false,
             ASTRules::PrecheckSize,
+            None,
         )
         .unwrap();
         assert_eq!(fee, 0);
@@ -9285,6 +9396,7 @@ pub mod test {
             &signed_contract_call_tx,
             false,
             ASTRules::PrecheckSize,
+            None,
         )
         .unwrap_err();
         conn.commit_block();
@@ -9310,7 +9422,7 @@ pub mod test {
             return Err(Error::InvalidStacksTransaction(msg, false));
         }
 
-        StacksChainState::process_transaction(clarity_block, tx, quiet, ast_rules)
+        StacksChainState::process_transaction(clarity_block, tx, quiet, ast_rules, None)
     }
 
     #[test]
@@ -9875,6 +9987,7 @@ pub mod test {
             &signed_runtime_checkerror_tx_clar1,
             false,
             ASTRules::PrecheckSize,
+            None,
         )
         .unwrap();
         assert_eq!(fee, 1);

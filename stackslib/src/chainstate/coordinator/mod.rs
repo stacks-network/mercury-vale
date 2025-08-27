@@ -14,21 +14,15 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-use std::path::PathBuf;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::fs;
 use std::sync::atomic::AtomicBool;
-use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
-use std::{cmp, fs};
 
 use clarity::vm::costs::ExecutionCost;
-use clarity::vm::database::BurnStateDB;
-use clarity::vm::types::{PrincipalData, QualifiedContractIdentifier};
-use clarity::vm::Value;
 use stacks_common::bitvec::BitVec;
 use stacks_common::types::chainstate::{
-    BlockHeaderHash, BurnchainHeaderHash, PoxId, SortitionId, StacksBlockId,
+    BlockHeaderHash, BurnchainHeaderHash, SortitionId, StacksBlockId,
 };
 use stacks_common::util::get_epoch_time_secs;
 
@@ -36,21 +30,15 @@ pub use self::comm::CoordinatorCommunication;
 use super::stacks::boot::{RewardSet, RewardSetData};
 use super::stacks::db::blocks::DummyEventDispatcher;
 use crate::burnchains::affirmation::{AffirmationMap, AffirmationMapEntry};
-use crate::burnchains::bitcoin::indexer::BitcoinIndexer;
-use crate::burnchains::db::{
-    BlockCommitMetadata, BurnchainBlockData, BurnchainDB, BurnchainDBTransaction,
-    BurnchainHeaderReader,
-};
+use crate::burnchains::db::{BurnchainBlockData, BurnchainDB, BurnchainHeaderReader};
 use crate::burnchains::{
-    Address, Burnchain, BurnchainBlockHeader, Error as BurnchainError, PoxConstants, Txid,
+    Burnchain, BurnchainBlockHeader, Error as BurnchainError, PoxConstants, Txid,
 };
 use crate::chainstate::burn::db::sortdb::{
     SortitionDB, SortitionDBConn, SortitionDBTx, SortitionHandleTx,
 };
-use crate::chainstate::burn::operations::leader_block_commit::{
-    RewardSetInfo, BURN_BLOCK_MINED_AT_MODULUS,
-};
-use crate::chainstate::burn::operations::{BlockstackOperationType, LeaderBlockCommitOp};
+use crate::chainstate::burn::operations::leader_block_commit::RewardSetInfo;
+use crate::chainstate::burn::operations::BlockstackOperationType;
 use crate::chainstate::burn::{BlockSnapshot, ConsensusHash};
 use crate::chainstate::coordinator::comm::{
     ArcCounterCoordinatorNotices, CoordinatorEvents, CoordinatorNotices, CoordinatorReceivers,
@@ -58,23 +46,22 @@ use crate::chainstate::coordinator::comm::{
 use crate::chainstate::stacks::address::PoxAddress;
 use crate::chainstate::stacks::boot::{POX_3_NAME, POX_4_NAME};
 use crate::chainstate::stacks::db::accounts::MinerReward;
+#[cfg(test)]
+use crate::chainstate::stacks::db::ChainStateBootData;
 use crate::chainstate::stacks::db::{
-    ChainStateBootData, ClarityTx, MinerRewardInfo, StacksChainState, StacksEpochReceipt,
-    StacksHeaderInfo,
+    MinerRewardInfo, StacksChainState, StacksEpochReceipt, StacksHeaderInfo,
 };
 use crate::chainstate::stacks::events::{
     StacksBlockEventData, StacksTransactionEvent, StacksTransactionReceipt, TransactionOrigin,
 };
 use crate::chainstate::stacks::index::marf::MARFOpenOpts;
-use crate::chainstate::stacks::index::{Error as IndexError, MarfTrieId};
+use crate::chainstate::stacks::index::Error as IndexError;
 use crate::chainstate::stacks::miner::{signal_mining_blocked, signal_mining_ready, MinerStatus};
-use crate::chainstate::stacks::{
-    Error as ChainstateError, StacksBlock, StacksBlockHeader, TransactionPayload,
-};
+use crate::chainstate::stacks::{Error as ChainstateError, StacksBlockHeader, TransactionPayload};
 use crate::core::{
     StacksEpoch, StacksEpochId, FIRST_BURNCHAIN_CONSENSUS_HASH, FIRST_STACKS_BLOCK_HASH,
 };
-use crate::cost_estimates::{CostEstimator, FeeEstimator, PessimisticEstimator};
+use crate::cost_estimates::{CostEstimator, FeeEstimator};
 use crate::monitoring::{
     increment_contract_calls_processed, increment_stx_blocks_processed_counter,
 };
@@ -195,6 +182,7 @@ pub trait BlockEventDispatcher {
         burns: u64,
         reward_recipients: Vec<PoxAddress>,
         consensus_hash: &ConsensusHash,
+        parent_burn_block_hash: &BurnchainHeaderHash,
     );
 }
 
@@ -208,6 +196,9 @@ pub struct ChainsCoordinatorConfig {
     /// true: always wait for canonical anchor blocks, even if it stalls the chain
     /// false: proceed to process new chain history even if we're missing an anchor block.
     pub require_affirmed_anchor_blocks: bool,
+    /// true: enable transactions indexing
+    /// false: no transactions indexing
+    pub txindex: bool,
 }
 
 impl ChainsCoordinatorConfig {
@@ -216,14 +207,16 @@ impl ChainsCoordinatorConfig {
             always_use_affirmation_maps: true,
             require_affirmed_anchor_blocks: true,
             assume_present_anchor_blocks: true,
+            txindex: false,
         }
     }
 
-    pub fn test_new() -> ChainsCoordinatorConfig {
+    pub fn test_new(txindex: bool) -> ChainsCoordinatorConfig {
         ChainsCoordinatorConfig {
             always_use_affirmation_maps: false,
             require_affirmed_anchor_blocks: false,
             assume_present_anchor_blocks: false,
+            txindex,
         }
     }
 }
@@ -249,7 +242,7 @@ pub struct ChainsCoordinator<
     pub reward_set_provider: R,
     pub notifier: N,
     pub atlas_config: AtlasConfig,
-    config: ChainsCoordinatorConfig,
+    pub config: ChainsCoordinatorConfig,
     burnchain_indexer: B,
     /// Used to tell the P2P thread that the stackerdb
     ///  needs to be refreshed.
@@ -432,8 +425,11 @@ impl<T: BlockEventDispatcher> OnChainRewardSetProvider<'_, T> {
                     return Ok(RewardSet::empty());
                 }
             }
-            StacksEpochId::Epoch25 | StacksEpochId::Epoch30 | StacksEpochId::Epoch31 => {
-                // Epoch 2.5, 3.0, and 3.1 compute reward sets, but *only* if PoX-4 is active
+            StacksEpochId::Epoch25
+            | StacksEpochId::Epoch30
+            | StacksEpochId::Epoch31
+            | StacksEpochId::Epoch32 => {
+                // Epoch 2.5, 3.0, 3.1 and 3.2 compute reward sets, but *only* if PoX-4 is active
                 if burnchain
                     .pox_constants
                     .active_pox_contract(current_burn_height)
@@ -646,6 +642,7 @@ impl<T: BlockEventDispatcher, U: RewardSetProvider, B: BurnchainHeaderReader>
         path: &str,
         reward_set_provider: U,
         indexer: B,
+        txindex: bool,
     ) -> ChainsCoordinator<'a, T, (), U, (), (), B> {
         ChainsCoordinator::test_new_full(
             burnchain,
@@ -655,6 +652,7 @@ impl<T: BlockEventDispatcher, U: RewardSetProvider, B: BurnchainHeaderReader>
             None,
             indexer,
             None,
+            txindex,
         )
     }
 
@@ -668,6 +666,7 @@ impl<T: BlockEventDispatcher, U: RewardSetProvider, B: BurnchainHeaderReader>
         dispatcher: Option<&'a T>,
         burnchain_indexer: B,
         atlas_config: Option<AtlasConfig>,
+        txindex: bool,
     ) -> ChainsCoordinator<'a, T, (), U, (), (), B> {
         let burnchain = burnchain.clone();
 
@@ -713,7 +712,7 @@ impl<T: BlockEventDispatcher, U: RewardSetProvider, B: BurnchainHeaderReader>
             notifier: (),
             atlas_config,
             atlas_db: Some(atlas_db),
-            config: ChainsCoordinatorConfig::test_new(),
+            config: ChainsCoordinatorConfig::test_new(txindex),
             burnchain_indexer,
             refresh_stacker_db: Arc::new(AtomicBool::new(false)),
             in_nakamoto_epoch: false,
@@ -956,6 +955,7 @@ pub fn dispatcher_announce_burn_ops<T: BlockEventDispatcher>(
         paid_rewards.burns,
         recipients,
         consensus_hash,
+        &burn_header.parent_block_hash,
     );
 }
 
@@ -997,14 +997,14 @@ fn consolidate_affirmation_maps(
 ) -> AffirmationMap {
     let mut am_entries = vec![];
     for i in 0..last_2_05_rc {
-        if i < sort_am.affirmations.len() {
-            am_entries.push(sort_am.affirmations[i]);
+        if let Some(am_entry) = sort_am.affirmations.get(i) {
+            am_entries.push(*am_entry);
         } else {
             return AffirmationMap::new(am_entries);
         }
     }
-    for i in last_2_05_rc..given_am.len() {
-        am_entries.push(given_am.affirmations[i]);
+    for am_entry in given_am.affirmations.iter().skip(last_2_05_rc) {
+        am_entries.push(*am_entry);
     }
 
     AffirmationMap::new(am_entries)
@@ -2391,12 +2391,9 @@ impl<
     pub fn handle_new_burnchain_block(&mut self) -> Result<NewBurnchainBlockStatus, Error> {
         let canonical_burnchain_tip = self.burnchain_blocks_db.get_canonical_chain_tip()?;
         let epochs = SortitionDB::get_stacks_epochs(self.sortition_db.conn())?;
-        let target_epoch_index =
-            StacksEpoch::find_epoch(&epochs, canonical_burnchain_tip.block_height)
-                .expect("FATAL: epoch not defined for burnchain height");
         let target_epoch = epochs
-            .get(target_epoch_index)
-            .expect("FATAL: StacksEpoch::find_epoch() returned an invalid index");
+            .epoch_at_height(canonical_burnchain_tip.block_height)
+            .expect("FATAL: epoch not defined for burnchain height");
         if target_epoch.epoch_id < StacksEpochId::Epoch30 {
             // burnchain has not yet advanced to epoch 3.0
             return self
@@ -2421,11 +2418,9 @@ impl<
                 }),
             None => SortitionDB::get_canonical_burn_chain_tip(self.sortition_db.conn())?,
         };
-        let target_epoch_index = StacksEpoch::find_epoch(&epochs, canonical_snapshot.block_height)
-            .expect("FATAL: epoch not defined for BlockSnapshot height");
         let target_epoch = epochs
-            .get(target_epoch_index)
-            .expect("FATAL: StacksEpoch::find_epoch() returned an invalid index");
+            .epoch_at_height(canonical_snapshot.block_height)
+            .expect("FATAL: epoch not defined for BlockSnapshot height");
 
         if target_epoch.epoch_id < StacksEpochId::Epoch30 {
             // need to catch the sortition DB up
@@ -3486,7 +3481,10 @@ pub fn check_chainstate_db_versions(
             .expect("FATAL: could not query sortition DB for maximum block height");
         let cur_epoch_idx = StacksEpoch::find_epoch(epochs, max_height)
             .unwrap_or_else(|| panic!("FATAL: no epoch defined for burn height {max_height}"));
-        let cur_epoch = epochs[cur_epoch_idx].epoch_id;
+        let cur_epoch = epochs
+            .get(cur_epoch_idx)
+            .expect("FATAL: failed to index epochs list")
+            .epoch_id;
 
         // save for later
         cur_epoch_opt = Some(cur_epoch.clone());

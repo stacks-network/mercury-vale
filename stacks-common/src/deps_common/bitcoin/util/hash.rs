@@ -50,7 +50,6 @@ impl_array_newtype!(Ripemd160Hash, u8, 20);
 /// A Bitcoin hash160, 20-bytes, computed from x as RIPEMD160(SHA256(x))
 pub struct Hash160([u8; 20]);
 impl_array_newtype!(Hash160, u8, 20);
-impl_byte_array_rusqlite_only!(Hash160);
 
 impl Hash160 {
     /// Convert the Hash160 inner bytes to a non-prefixed hex string
@@ -370,7 +369,7 @@ impl fmt::Debug for Sha256dHash {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let &Sha256dHash(data) = self;
         for ch in data.iter() {
-            write!(f, "{:02x}", ch)?;
+            write!(f, "{ch:02x}")?;
         }
         Ok(())
     }
@@ -381,7 +380,7 @@ impl fmt::Debug for Hash160 {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let &Hash160(data) = self;
         for ch in data.iter() {
-            write!(f, "{:02x}", ch)?;
+            write!(f, "{ch:02x}")?;
         }
         Ok(())
     }
@@ -403,7 +402,7 @@ impl fmt::LowerHex for Sha256dHash {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let &Sha256dHash(data) = self;
         for ch in data.iter().rev() {
-            write!(f, "{:02x}", ch)?;
+            write!(f, "{ch:02x}")?;
         }
         Ok(())
     }
@@ -414,7 +413,7 @@ impl fmt::UpperHex for Sha256dHash {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let &Sha256dHash(data) = self;
         for ch in data.iter().rev() {
-            write!(f, "{:02X}", ch)?;
+            write!(f, "{ch:02X}")?;
         }
         Ok(())
     }
@@ -437,7 +436,7 @@ pub fn bitcoin_merkle_root(data: Vec<Sha256dHash>) -> Sha256dHash {
         return data[0];
     }
     // Recursion
-    let iterations = (data.len() + 1) / 2;
+    let iterations = data.len().div_ceil(2);
     let mut next = Vec::with_capacity(iterations);
     for idx in 0..iterations {
         let idx1 = 2 * idx;

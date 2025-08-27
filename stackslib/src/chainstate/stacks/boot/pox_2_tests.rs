@@ -14,59 +14,37 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 
 use clarity::vm::clarity::ClarityConnection;
-use clarity::vm::contexts::OwnedEnvironment;
-use clarity::vm::contracts::Contract;
-use clarity::vm::costs::{CostOverflowingMath, LimitedCostTracker};
+use clarity::vm::costs::LimitedCostTracker;
 use clarity::vm::database::*;
-use clarity::vm::errors::{
-    CheckErrors, Error, IncomparableError, InterpreterError, InterpreterResult, RuntimeErrorType,
-};
-use clarity::vm::eval;
 use clarity::vm::events::StacksTransactionEvent;
-use clarity::vm::representations::SymbolicExpression;
-use clarity::vm::tests::{execute, is_committed, is_err_code, symbols_from_values};
-use clarity::vm::types::Value::Response;
 use clarity::vm::types::{
-    BuffData, OptionalData, PrincipalData, QualifiedContractIdentifier, ResponseData, SequenceData,
-    StacksAddressExtensions, StandardPrincipalData, TupleData, TupleTypeSignature, TypeSignature,
-    Value, NONE,
+    BuffData, PrincipalData, SequenceData, StacksAddressExtensions, StandardPrincipalData,
+    TupleData, Value,
 };
 use stacks_common::address::AddressHashMode;
-use stacks_common::types::chainstate::{
-    BlockHeaderHash, BurnchainHeaderHash, StacksAddress, StacksBlockId, VRFSeed,
-};
+use stacks_common::types::chainstate::{BurnchainHeaderHash, StacksAddress, StacksBlockId};
 use stacks_common::types::Address;
-use stacks_common::util::hash::{hex_bytes, to_hex, Sha256Sum, Sha512Trunc256Sum};
+use stacks_common::util::hash::hex_bytes;
 
 use super::test::*;
 use super::RawRewardSetEntry;
 use crate::burnchains::Burnchain;
 use crate::chainstate::burn::db::sortdb::SortitionDB;
 use crate::chainstate::burn::operations::*;
-use crate::chainstate::burn::{BlockSnapshot, ConsensusHash};
+use crate::chainstate::burn::BlockSnapshot;
 use crate::chainstate::stacks::address::{PoxAddress, PoxAddressType20, PoxAddressType32};
-use crate::chainstate::stacks::boot::{
-    BOOT_CODE_COST_VOTING_TESTNET as BOOT_CODE_COST_VOTING, BOOT_CODE_POX_TESTNET, POX_2_NAME,
-    POX_3_NAME,
-};
-use crate::chainstate::stacks::db::{
-    MinerPaymentSchedule, StacksChainState, StacksDBConn, StacksHeaderInfo, MINER_REWARD_MATURITY,
-};
+use crate::chainstate::stacks::boot::{POX_2_NAME, POX_3_NAME};
+use crate::chainstate::stacks::db::{StacksChainState, StacksDBConn};
 use crate::chainstate::stacks::events::TransactionOrigin;
-use crate::chainstate::stacks::index::marf::MarfConnection;
-use crate::chainstate::stacks::index::MarfTrieId;
 use crate::chainstate::stacks::tests::make_coinbase;
 use crate::chainstate::stacks::*;
-use crate::clarity_vm::clarity::{ClarityBlockConnection, Error as ClarityError};
-use crate::clarity_vm::database::marf::{MarfedKV, WritableMarfStore};
 use crate::clarity_vm::database::HeadersDBConn;
 use crate::core::*;
 use crate::net::test::{TestEventObserver, TestPeer};
 use crate::util_lib::boot::boot_code_id;
-use crate::util_lib::db::{DBConn, FromRow};
 
 const USTX_PER_HOLDER: u128 = 1_000_000;
 
@@ -3797,7 +3775,7 @@ fn test_get_pox_addrs() {
                     assert!(opdata.all_outputs_burn());
                     assert!(opdata.burn_fee > 0);
 
-                    if tenure_id > 1 && cur_reward_cycle > lockup_reward_cycle.into() {
+                    if tenure_id > 1 && cur_reward_cycle > u128::from(lockup_reward_cycle) {
                         prepared = true;
                     }
                 }
@@ -3807,7 +3785,7 @@ fn test_get_pox_addrs() {
             for op in burn_ops.iter() {
                 if let BlockstackOperationType::LeaderBlockCommit(ref opdata) = &op {
                     eprintln!("reward phase {}: {:?}", burn_height, opdata);
-                    if tenure_id > 1 && cur_reward_cycle == (lockup_reward_cycle + 1).into() {
+                    if tenure_id > 1 && cur_reward_cycle == u128::from(lockup_reward_cycle + 1) {
                         assert!(!opdata.all_outputs_burn());
                         rewarded = true;
                     } else {
@@ -3874,7 +3852,7 @@ fn test_get_pox_addrs() {
             eprintln!("ntotal_liquid_ustx: {total_liquid_ustx}");
             eprintln!("total-stacked: {total_stacked}");
 
-            if cur_reward_cycle == lockup_reward_cycle.into() {
+            if cur_reward_cycle == u128::from(lockup_reward_cycle) {
                 assert_eq!(reward_addrs.len(), 4);
                 all_reward_addrs = reward_addrs;
             }
@@ -4095,7 +4073,7 @@ fn test_stack_with_segwit() {
                     assert!(opdata.all_outputs_burn());
                     assert!(opdata.burn_fee > 0);
 
-                    if tenure_id > 1 && cur_reward_cycle > lockup_reward_cycle.into() {
+                    if tenure_id > 1 && cur_reward_cycle > u128::from(lockup_reward_cycle) {
                         prepared = true;
                     }
                 }
@@ -4105,7 +4083,7 @@ fn test_stack_with_segwit() {
             for op in burn_ops.iter() {
                 if let BlockstackOperationType::LeaderBlockCommit(ref opdata) = &op {
                     eprintln!("reward phase {}: {:?}", burn_height, opdata);
-                    if tenure_id > 1 && cur_reward_cycle == (lockup_reward_cycle + 1).into() {
+                    if tenure_id > 1 && cur_reward_cycle == u128::from(lockup_reward_cycle + 1) {
                         assert!(!opdata.all_outputs_burn());
                         rewarded = true;
                     } else {
@@ -4172,7 +4150,7 @@ fn test_stack_with_segwit() {
             eprintln!("total_liquid_ustx: {total_liquid_ustx}");
             eprintln!("total-stacked: {total_stacked}");
 
-            if cur_reward_cycle == lockup_reward_cycle.into() {
+            if cur_reward_cycle == u128::from(lockup_reward_cycle) {
                 assert_eq!(reward_addrs.len(), 4);
                 all_reward_addrs = reward_addrs;
             }

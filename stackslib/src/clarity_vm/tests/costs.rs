@@ -14,21 +14,15 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use std::collections::HashMap;
-
 use clarity::vm::ast::ASTRules;
 use clarity::vm::clarity::TransactionConnection;
-use clarity::vm::contexts::{
-    AssetMap, AssetMapEntry, Environment, GlobalContext, OwnedEnvironment,
-};
-use clarity::vm::contracts::Contract;
+use clarity::vm::contexts::{AssetMap, OwnedEnvironment};
 use clarity::vm::costs::cost_functions::ClarityCostFunction;
 use clarity::vm::costs::{
-    parse_cost, ClarityCostFunctionEvaluator, ClarityCostFunctionReference, CostErrors,
+    compute_cost, ClarityCostFunctionEvaluator, ClarityCostFunctionReference, CostErrors,
     DefaultVersion, ExecutionCost, LimitedCostTracker, COSTS_1_NAME, COSTS_2_NAME, COSTS_3_NAME,
 };
-use clarity::vm::database::{ClarityDatabase, MemoryBackingStore};
-use clarity::vm::errors::{CheckErrors, Error, RuntimeErrorType};
+use clarity::vm::errors::Error;
 use clarity::vm::events::StacksTransactionEvent;
 use clarity::vm::functions::NativeFunctions;
 use clarity::vm::representations::SymbolicExpression;
@@ -37,16 +31,12 @@ use clarity::vm::test_util::{
     TEST_HEADER_DB,
 };
 use clarity::vm::tests::test_only_mainnet_to_chain_id;
-use clarity::vm::types::{
-    AssetIdentifier, OptionalData, PrincipalData, QualifiedContractIdentifier, ResponseData, Value,
-};
+use clarity::vm::types::{PrincipalData, QualifiedContractIdentifier, Value};
 use clarity::vm::{ClarityVersion, ContractName};
 use lazy_static::lazy_static;
-use stacks_common::types::chainstate::{BlockHeaderHash, StacksBlockId};
+use stacks_common::types::chainstate::StacksBlockId;
 use stacks_common::types::StacksEpochId;
-use stacks_common::util::hash::hex_bytes;
 
-use crate::chainstate::stacks::index::storage::TrieFileStorage;
 use crate::chainstate::stacks::index::ClarityMarfTrieId;
 use crate::clarity_vm::clarity::ClarityInstance;
 use crate::clarity_vm::database::marf::MarfedKV;
@@ -885,19 +875,16 @@ fn eval_cost_fn(
     let mainnet = owned_env.is_mainnet();
     let boot_costs_id = boot_code_id(cost_contract_name, mainnet);
     let cost_fn_name = cost_fn.get_name_str();
-
-    let exec = format!("({cost_fn_name} u{argument})");
-
-    let exec_result = owned_env
-        .eval_read_only(&boot_costs_id, &exec)
-        .map(|(value, _, _)| Some(value));
-
+    let cost_tracker = owned_env.mut_cost_tracker();
+    let data = match cost_tracker {
+        LimitedCostTracker::Free => panic!(),
+        LimitedCostTracker::Limited(data) => data,
+    };
     let clarity_cost_fn_ref = ClarityCostFunctionReference {
         contract_id: boot_costs_id,
         function_name: cost_fn_name.to_string(),
     };
-
-    parse_cost(&clarity_cost_fn_ref.to_string(), exec_result)
+    compute_cost(data, clarity_cost_fn_ref, &[argument], data.epoch)
 }
 
 fn eval_replaced_cost_fn(
@@ -926,7 +913,13 @@ fn proptest_cost_fn(cost_fn: &ClarityCostFunction, cost_contract_name: &str) {
         inputs.push(2u64.pow(i) + 1);
     });
     for use_mainnet in [true, false] {
-        with_owned_env(StacksEpochId::latest(), use_mainnet, |mut owned_env| {
+        let epoch = match cost_contract_name {
+            COSTS_1_NAME => StacksEpochId::Epoch20,
+            COSTS_2_NAME => StacksEpochId::Epoch2_05,
+            COSTS_3_NAME => StacksEpochId::latest(),
+            _ => panic!(),
+        };
+        with_owned_env(epoch, use_mainnet, |mut owned_env| {
             for i in inputs.iter() {
                 eprintln!("Evaluating {cost_contract_name}.{cost_fn}({i})");
                 let clar_evaled = eval_cost_fn(&mut owned_env, cost_contract_name, cost_fn, *i);
@@ -1179,7 +1172,8 @@ fn test_cost_contract_short_circuits(use_mainnet: bool, clarity_version: Clarity
                     &ast,
                     contract_src,
                     None,
-                    |_, _| false,
+                    |_, _| None,
+                    None,
                 )
                 .unwrap();
                 tx.save_analysis(contract_name, &analysis).unwrap();
@@ -1463,7 +1457,8 @@ fn test_cost_voting_integration(use_mainnet: bool, clarity_version: ClarityVersi
                     &ast,
                     contract_src,
                     None,
-                    |_, _| false,
+                    |_, _| None,
+                    None,
                 )
                 .unwrap();
                 tx.save_analysis(contract_name, &analysis).unwrap();

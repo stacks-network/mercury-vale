@@ -22,9 +22,6 @@
 #[macro_use]
 extern crate stacks_common;
 
-#[macro_use(slog_debug, slog_info, slog_warn)]
-extern crate slog;
-
 #[cfg(not(any(target_os = "macos", target_os = "windows", target_arch = "arm")))]
 use tikv_jemallocator::Jemalloc;
 
@@ -37,7 +34,7 @@ use std::fs::File;
 use std::io::prelude::*;
 use std::io::BufReader;
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::{env, fs, io, process, thread};
 
 use blockstack_lib::burnchains::bitcoin::{spv, BitcoinNetworkType};
@@ -302,6 +299,7 @@ fn check_shadow_network(network: &str) {
 }
 
 #[cfg_attr(test, mutants::skip)]
+#[allow(clippy::indexing_slicing)]
 fn main() {
     let mut argv: Vec<String> = env::args().collect();
     if argv.len() < 2 {
@@ -605,7 +603,7 @@ Given a <working-dir>, obtain a 2100 header hash block inventory (with an empty 
         let chain_tip = SortitionDB::get_canonical_burn_chain_tip(sort_db.conn())
             .expect("Failed to get sortition chain tip");
 
-        let start = time::Instant::now();
+        let start = Instant::now();
 
         let header_hashes = {
             let ic = sort_db.index_conn();
@@ -614,14 +612,11 @@ Given a <working-dir>, obtain a 2100 header hash block inventory (with an empty 
                 .unwrap()
         };
 
-        println!(
-            "Fetched header hashes in {}",
-            start.elapsed().as_seconds_f32()
-        );
-        let start = time::Instant::now();
+        println!("Fetched header hashes in {}", start.elapsed().as_secs_f32());
+        let start = Instant::now();
 
         let block_inv = chain_state.get_blocks_inventory(&header_hashes).unwrap();
-        println!("Fetched block inv in {}", start.elapsed().as_seconds_f32());
+        println!("Fetched block inv in {}", start.elapsed().as_secs_f32());
         println!("{:?}", &block_inv);
 
         println!("Done!");
@@ -652,7 +647,7 @@ check if the associated microblocks can be downloaded
         let chain_tip = SortitionDB::get_canonical_burn_chain_tip(sort_db.conn())
             .expect("Failed to get sortition chain tip");
 
-        let start = time::Instant::now();
+        let start = Instant::now();
         let local_peer = LocalPeer::new(
             0,
             0,
@@ -671,12 +666,9 @@ check if the associated microblocks can be downloaded
                 .unwrap()
         };
 
-        println!(
-            "Fetched header hashes in {}",
-            start.elapsed().as_seconds_f32()
-        );
+        println!("Fetched header hashes in {}", start.elapsed().as_secs_f32());
 
-        let start = time::Instant::now();
+        let start = Instant::now();
         let mut total_load_headers = 0;
 
         for (consensus_hash, block_hash_opt) in header_hashes.iter() {
@@ -736,7 +728,7 @@ check if the associated microblocks can be downloaded
 
         println!(
             "Checked can_download in {} (headers load took {}ms)",
-            start.elapsed().as_seconds_f32(),
+            start.elapsed().as_secs_f32(),
             total_load_headers
         );
 
@@ -1643,6 +1635,7 @@ pub fn dump_consts() {
 }
 
 #[cfg_attr(test, mutants::skip)]
+#[allow(clippy::indexing_slicing)]
 pub fn tip_mine() {
     let argv: Vec<String> = env::args().collect();
     if argv.len() < 6 {
@@ -1882,6 +1875,7 @@ simulating a miner.
 /// Perform an analysis of the anti-MEV algorithm in epoch 3.0, vis-a-vis the status quo.
 /// Results are printed to stdout.
 /// Exits with 0 on success, and 1 on failure.
+#[allow(clippy::indexing_slicing)]
 fn analyze_sortition_mev(argv: Vec<String>) {
     if argv.len() < 7 || (argv.len() >= 7 && argv.len() % 2 != 1) {
         eprintln!(

@@ -21,51 +21,39 @@
 /// concerned with building out and testing block histories from manually-constructed blocks,
 /// ignoring mempool-level concerns entirely.
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::{Path, PathBuf};
-use std::{fs, io};
+use std::collections::HashMap;
 
+use clarity::codec::StacksMessageCodec;
 use clarity::vm::clarity::ClarityConnection;
 use clarity::vm::costs::LimitedCostTracker;
-use clarity::vm::database::ClarityDatabase;
 use clarity::vm::test_util::TEST_BURN_STATE_DB;
 use clarity::vm::types::*;
-use rand::seq::SliceRandom;
+use mempool::MemPoolWalkStrategy;
 use rand::{thread_rng, Rng};
 use rusqlite::params;
 use stacks_common::address::*;
-use stacks_common::types::chainstate::SortitionId;
 use stacks_common::util::hash::MerkleTree;
 use stacks_common::util::secp256k1::Secp256k1PrivateKey;
-use stacks_common::util::vrf::VRFProof;
 use stacks_common::util::{get_epoch_time_ms, sleep_ms};
 
-use crate::burnchains::tests::*;
-use crate::burnchains::*;
 use crate::chainstate::burn::db::sortdb::*;
-use crate::chainstate::burn::operations::{
-    BlockstackOperationType, LeaderBlockCommitOp, LeaderKeyRegisterOp,
-};
+use crate::chainstate::burn::operations::{BlockstackOperationType, LeaderBlockCommitOp};
 use crate::chainstate::burn::*;
 use crate::chainstate::coordinator::Error as CoordinatorError;
 use crate::chainstate::stacks::db::blocks::test::store_staging_block;
+use crate::chainstate::stacks::db::blocks::MemPoolRejection;
 use crate::chainstate::stacks::db::test::*;
 use crate::chainstate::stacks::db::*;
 use crate::chainstate::stacks::events::StacksTransactionReceipt;
 use crate::chainstate::stacks::miner::*;
 use crate::chainstate::stacks::test::codec_all_transactions;
 use crate::chainstate::stacks::tests::*;
-use crate::chainstate::stacks::{
-    Error as ChainstateError, C32_ADDRESS_VERSION_TESTNET_SINGLESIG, *,
-};
+use crate::chainstate::stacks::{Error as ChainstateError, C32_ADDRESS_VERSION_TESTNET_SINGLESIG};
 use crate::core::mempool::MemPoolWalkSettings;
 use crate::core::tests::make_block;
 use crate::core::{FIRST_BURNCHAIN_CONSENSUS_HASH, *};
 use crate::cost_estimates::metrics::UnitMetric;
 use crate::cost_estimates::UnitEstimator;
-use crate::net::test::*;
-use crate::util_lib::boot::boot_code_addr;
-use crate::util_lib::db::Error as db_error;
 
 #[test]
 fn test_build_anchored_blocks_empty() {
@@ -1126,155 +1114,6 @@ fn test_build_anchored_blocks_connected_by_microblocks_across_epoch_invalid() {
 
     let last_block = last_block.unwrap();
     assert_eq!(last_block.header.total_work.work, 10); // mined a chain successfully across the epoch boundary
-}
-
-#[test]
-/// This test covers two different behaviors added to the block assembly logic:
-/// (1) Ordering by estimated fee rate: the test peer uses the "unit" estimator
-/// for costs, but this estimator still uses the fee of the transaction to order
-/// the mempool. This leads to the behavior in this test where txs are included
-/// like 0 -> 1 -> 2 ... -> 25 -> next origin 0 -> 1 ...
-/// because the fee goes up with the nonce.
-/// (2) Discovery of nonce in the mempool iteration: this behavior allows the miner
-/// to consider an origin's "next" transaction immediately. Prior behavior would
-/// only do so after processing any other origin's transactions.
-fn test_build_anchored_blocks_incrementing_nonces() {
-    let private_keys: Vec<_> = (0..10).map(|_| StacksPrivateKey::random()).collect();
-    let addresses: Vec<_> = private_keys
-        .iter()
-        .map(|sk| {
-            StacksAddress::from_public_keys(
-                C32_ADDRESS_VERSION_TESTNET_SINGLESIG,
-                &AddressHashMode::SerializeP2PKH,
-                1,
-                &vec![StacksPublicKey::from_private(sk)],
-            )
-            .unwrap()
-        })
-        .collect();
-
-    let initial_balances: Vec<_> = addresses
-        .iter()
-        .map(|addr| (addr.to_account_principal(), 100000000000))
-        .collect();
-
-    let mut peer_config = TestPeerConfig::new(function_name!(), 2030, 2031);
-    peer_config.initial_balances = initial_balances;
-    let burnchain = peer_config.burnchain.clone();
-
-    let mut peer = TestPeer::new(peer_config);
-
-    let chainstate_path = peer.chainstate_path.clone();
-
-    let mut mempool = MemPoolDB::open_test(false, 0x80000000, &chainstate_path).unwrap();
-
-    // during the tenure, let's push transactions to the mempool
-    let tip =
-        SortitionDB::get_canonical_burn_chain_tip(peer.sortdb.as_ref().unwrap().conn()).unwrap();
-
-    let (burn_ops, stacks_block, microblocks) = peer.make_tenure(
-        |ref mut miner,
-         ref mut sortdb,
-         ref mut chainstate,
-         vrf_proof,
-         ref parent_opt,
-         ref parent_microblock_header_opt| {
-            let parent_tip = match parent_opt {
-                None => StacksChainState::get_genesis_header_info(chainstate.db()).unwrap(),
-                Some(block) => {
-                    let ic = sortdb.index_conn();
-                    let snapshot = SortitionDB::get_block_snapshot_for_winning_stacks_block(
-                        &ic,
-                        &tip.sortition_id,
-                        &block.block_hash(),
-                    )
-                    .unwrap()
-                    .unwrap(); // succeeds because we don't fork
-                    StacksChainState::get_anchored_block_header_info(
-                        chainstate.db(),
-                        &snapshot.consensus_hash,
-                        &snapshot.winning_stacks_block_hash,
-                    )
-                    .unwrap()
-                    .unwrap()
-                }
-            };
-
-            let parent_header_hash = parent_tip.anchored_header.block_hash();
-            let parent_consensus_hash = parent_tip.consensus_hash.clone();
-            let coinbase_tx = make_coinbase(miner, 0);
-
-            let txs: Vec<_> = private_keys
-                .iter()
-                .flat_map(|privk| {
-                    let privk = privk.clone();
-                    (0..25).map(move |tx_nonce| {
-                        let contract = "(define-data-var bar int 0)";
-                        make_user_contract_publish(
-                            &privk,
-                            tx_nonce,
-                            200 * (tx_nonce + 1),
-                            &format!("contract-{}", tx_nonce),
-                            contract,
-                        )
-                    })
-                })
-                .collect();
-
-            for tx in txs {
-                mempool
-                    .submit(
-                        chainstate,
-                        sortdb,
-                        &parent_consensus_hash,
-                        &parent_header_hash,
-                        &tx,
-                        None,
-                        &ExecutionCost::max_value(),
-                        &StacksEpochId::Epoch20,
-                    )
-                    .unwrap();
-            }
-
-            let anchored_block = StacksBlockBuilder::build_anchored_block(
-                chainstate,
-                &sortdb.index_handle_at_tip(),
-                &mut mempool,
-                &parent_tip,
-                tip.total_burn,
-                vrf_proof,
-                Hash160([0; 20]),
-                &coinbase_tx,
-                BlockBuilderSettings::limited(),
-                None,
-                &burnchain,
-            )
-            .unwrap();
-            (anchored_block.0, vec![])
-        },
-    );
-
-    peer.next_burnchain_block(burn_ops);
-    peer.process_stacks_epoch_at_tip(&stacks_block, &microblocks);
-
-    // expensive transaction was not mined, but the two stx-transfers were
-    assert_eq!(stacks_block.txs.len(), 251);
-
-    // block should be ordered like coinbase, nonce 0, nonce 1, .. nonce 25, nonce 0, ..
-    //  because the tx fee for each transaction increases with the nonce
-    for (i, tx) in stacks_block.txs.iter().enumerate() {
-        if i == 0 {
-            let okay = matches!(tx.payload, TransactionPayload::Coinbase(..));
-            assert!(okay, "Coinbase should be first tx");
-        } else {
-            let expected_nonce = (i - 1) % 25;
-            assert_eq!(
-                tx.get_origin_nonce(),
-                expected_nonce as u64,
-                "{i}th transaction should have nonce = {expected_nonce}",
-            );
-        }
-    }
 }
 
 #[test]
@@ -4852,7 +4691,7 @@ fn mempool_walk_test_users_10_rounds_3_cache_size_2000_null_prob_100() {
 fn paramaterized_mempool_walk_test(
     num_users: usize,
     num_rounds: usize,
-    nonce_and_candidate_cache_size: u64,
+    nonce_and_candidate_cache_size: usize,
     consider_no_estimate_tx_prob: u8,
     timeout_ms: u128,
 ) {
@@ -4999,7 +4838,6 @@ fn paramaterized_mempool_walk_test(
                                 // Generate any success result
                                 TransactionResult::success(
                                     &available_tx.tx.tx,
-                                    available_tx.tx.metadata.tx_fee,
                                     StacksTransactionReceipt::from_stx_transfer(
                                         available_tx.tx.tx.clone(),
                                         vec![],
@@ -5024,6 +4862,452 @@ fn paramaterized_mempool_walk_test(
                 "Mempool should find all {} transactions",
                 transaction_counter
             );
+        },
+    );
+}
+
+#[test]
+/// Test that the mempool walk query ignores old nonces and prefers next possible nonces before higher global fees.
+fn mempool_walk_test_next_nonce_with_highest_fee_rate_strategy() {
+    let key_address_pairs: Vec<_> = (0..7)
+        .map(|_user_index| {
+            let privk = StacksPrivateKey::random();
+            let addr = StacksAddress::from_public_keys(
+                C32_ADDRESS_VERSION_TESTNET_SINGLESIG,
+                &AddressHashMode::SerializeP2PKH,
+                1,
+                &vec![StacksPublicKey::from_private(&privk)],
+            )
+            .unwrap();
+            (privk, addr)
+        })
+        .collect();
+    let accounts: Vec<String> = key_address_pairs
+        .iter()
+        .map(|(_, b)| b.to_string())
+        .collect();
+    let address_0 = accounts[0].to_string();
+    let address_1 = accounts[1].to_string();
+    let address_2 = accounts[2].to_string();
+    let address_3 = accounts[3].to_string();
+    let address_4 = accounts[4].to_string();
+    let address_5 = accounts[5].to_string();
+    let address_6 = accounts[6].to_string();
+
+    let test_name = function_name!();
+    let mut peer_config = TestPeerConfig::new(&test_name, 0, 0);
+    peer_config.initial_balances = vec![];
+    for (privk, addr) in &key_address_pairs {
+        peer_config
+            .initial_balances
+            .push((addr.to_account_principal(), 1000000000));
+    }
+
+    let recipient =
+        StacksAddress::from_string("ST1RFD5Q2QPK3E0F08HG9XDX7SSC7CNRS0QR0SGEV").unwrap();
+
+    let mut chainstate =
+        instantiate_chainstate_with_balances(false, 0x80000000, &test_name, vec![]);
+    let chainstate_path = chainstate_path(&test_name);
+    let mut mempool = MemPoolDB::open_test(false, 0x80000000, &chainstate_path).unwrap();
+    let b_1 = make_block(
+        &mut chainstate,
+        ConsensusHash([0x1; 20]),
+        &(
+            FIRST_BURNCHAIN_CONSENSUS_HASH.clone(),
+            FIRST_STACKS_BLOCK_HASH.clone(),
+        ),
+        1,
+        1,
+    );
+    let b_2 = make_block(&mut chainstate, ConsensusHash([0x2; 20]), &b_1, 2, 2);
+
+    let mut tx_events = Vec::new();
+
+    // Simulate next possible nonces for **some** addresses. Leave some blank so we can test the case where the nonce cannot be
+    // found on the db table and has to be pulled from the MARF.
+    let mempool_tx = mempool.tx_begin().unwrap();
+    mempool_tx
+        .execute(
+            "INSERT INTO nonces (address, nonce) VALUES (?, ?), (?, ?), (?, ?), (?, ?), (?, ?)",
+            params![address_0, 2, address_1, 1, address_2, 6, address_4, 1, address_5, 0],
+        )
+        .unwrap();
+    mempool_tx.commit().unwrap();
+
+    // Test transactions with a wide variety of origin/sponsor configurations and fee rate values. Some transactions do not have a
+    // sponsor, some others do, and some others are sponsored by other sponsors. All will be in flight at the same time.
+    //
+    // tuple shape: (origin_address_index, origin_nonce, sponsor_address_index, sponsor_nonce, fee_rate)
+    let test_vectors = vec![
+        (0, 0, 0, 0, 100.0), // Old origin nonce - ignored
+        (0, 1, 0, 1, 200.0), // Old origin nonce - ignored
+        (0, 2, 0, 2, 300.0),
+        (0, 3, 0, 3, 400.0),
+        (0, 4, 3, 0, 500.0), // Nonce 0 for address 3 is not in the table but will be valid on MARF
+        (1, 0, 1, 0, 400.0), // Old origin nonce - ignored
+        (1, 1, 3, 1, 600.0),
+        (1, 2, 3, 2, 700.0),
+        (1, 3, 3, 3, 800.0),
+        (1, 4, 1, 4, 1200.0),
+        (2, 3, 2, 3, 9000.0), // Old origin nonce - ignored
+        (2, 4, 2, 4, 9000.0), // Old origin nonce - ignored
+        (2, 5, 2, 5, 9000.0), // Old origin nonce - ignored
+        (2, 6, 4, 0, 900.0),  // Old sponsor nonce - ignored
+        (2, 6, 4, 1, 1000.0),
+        (2, 7, 4, 2, 800.0),
+        (2, 8, 2, 8, 1000.0),
+        (2, 9, 3, 5, 1000.0),
+        (2, 10, 3, 6, 1500.0),
+        (3, 4, 3, 4, 100.0),
+        (4, 3, 5, 2, 550.0),
+        (5, 0, 5, 0, 500.0),
+        (5, 1, 5, 1, 500.0),
+        (5, 3, 4, 4, 2000.0),
+        (5, 4, 4, 5, 2000.0),
+        (6, 2, 6, 2, 1000.0), // Address has nonce 0 in MARF - ignored
+    ];
+    for (origin_index, origin_nonce, sponsor_index, sponsor_nonce, fee_rate) in
+        test_vectors.into_iter()
+    {
+        // Create tx, either standard or sponsored
+        let mut tx = if origin_index != sponsor_index {
+            let payload = TransactionPayload::TokenTransfer(
+                recipient.to_account_principal(),
+                1,
+                TokenTransferMemo([0; 34]),
+            );
+            sign_sponsored_singlesig_tx(
+                payload.into(),
+                &key_address_pairs[origin_index].0,
+                &key_address_pairs[sponsor_index].0,
+                origin_nonce,
+                sponsor_nonce,
+                200,
+            )
+        } else {
+            make_user_stacks_transfer(
+                &key_address_pairs[origin_index].0,
+                origin_nonce,
+                200,
+                &recipient.to_account_principal(),
+                1,
+            )
+        };
+
+        let mut mempool_tx = mempool.tx_begin().unwrap();
+
+        let origin_address = tx.origin_address();
+        let sponsor_address = tx.sponsor_address().unwrap_or(origin_address);
+        tx.set_tx_fee(fee_rate as u64);
+        let txid = tx.txid();
+        let tx_bytes = tx.serialize_to_vec();
+        let tx_fee = tx.get_tx_fee();
+        let height = 100;
+        MemPoolDB::try_add_tx(
+            &mut mempool_tx,
+            &mut chainstate,
+            &b_1.0,
+            &b_1.1,
+            true,
+            txid,
+            tx_bytes,
+            tx_fee,
+            height,
+            &origin_address,
+            origin_nonce,
+            &sponsor_address,
+            sponsor_nonce,
+            None,
+        )
+        .unwrap();
+        mempool_tx
+            .execute(
+                "UPDATE mempool SET fee_rate = ? WHERE txid = ?",
+                params![Some(fee_rate), &txid],
+            )
+            .unwrap();
+
+        mempool_tx.commit().unwrap();
+    }
+
+    // Visit transactions using the `NextNonceWithHighestFeeRate` strategy. Keep a record of the order of visits so we can compare
+    // at the end.
+    let mut mempool_settings = MemPoolWalkSettings::default();
+    mempool_settings.strategy = MemPoolWalkStrategy::NextNonceWithHighestFeeRate;
+    let mut considered_txs = vec![];
+    let deadline = get_epoch_time_ms() + 30000;
+    chainstate.with_read_only_clarity_tx(
+        &TEST_BURN_STATE_DB,
+        &StacksBlockHeader::make_index_block_hash(&b_2.0, &b_2.1),
+        |clarity_conn| {
+            loop {
+                if mempool
+                    .iterate_candidates::<_, ChainstateError, _>(
+                        clarity_conn,
+                        &mut tx_events,
+                        mempool_settings.clone(),
+                        |_, available_tx, _| {
+                            considered_txs.push((
+                                available_tx.tx.metadata.origin_address.to_string(),
+                                available_tx.tx.metadata.origin_nonce,
+                                available_tx.tx.metadata.sponsor_address.to_string(),
+                                available_tx.tx.metadata.sponsor_nonce,
+                                available_tx.tx.metadata.tx_fee,
+                            ));
+                            Ok(Some(
+                                // Generate any success result
+                                TransactionResult::success(
+                                    &available_tx.tx.tx,
+                                    StacksTransactionReceipt::from_stx_transfer(
+                                        available_tx.tx.tx.clone(),
+                                        vec![],
+                                        Value::okay(Value::Bool(true)).unwrap(),
+                                        ExecutionCost::ZERO,
+                                    ),
+                                )
+                                .convert_to_event(),
+                            ))
+                        },
+                    )
+                    .unwrap()
+                    .0
+                    == 0
+                {
+                    break;
+                }
+                assert!(get_epoch_time_ms() < deadline, "test timed out");
+            }
+
+            // Expected transaction consideration order, sorted by mineable first (next origin+sponsor nonces, highest fee).
+            // Ignores old and very future nonces.
+            let expected_tx_order = vec![
+                (address_2.clone(), 6, address_4.clone(), 1, 1000), // Round 1
+                (address_5.clone(), 0, address_5.clone(), 0, 500),
+                (address_0.clone(), 2, address_0.clone(), 2, 300),
+                (address_2.clone(), 7, address_4.clone(), 2, 800), // Round 2
+                (address_5.clone(), 1, address_5.clone(), 1, 500),
+                (address_0.clone(), 3, address_0.clone(), 3, 400),
+                (address_2.clone(), 8, address_2.clone(), 8, 1000), // Round 3
+                (address_4.clone(), 3, address_5.clone(), 2, 550),
+                (address_0.clone(), 4, address_3.clone(), 0, 500),
+                (address_5.clone(), 3, address_4.clone(), 4, 2000), // Round 4
+                (address_1.clone(), 1, address_3.clone(), 1, 600),
+                (address_5.clone(), 4, address_4.clone(), 5, 2000), // Round 5
+                (address_1.clone(), 2, address_3.clone(), 2, 700),
+                (address_1.clone(), 3, address_3.clone(), 3, 800), // Round 6
+                (address_1.clone(), 4, address_1.clone(), 4, 1200), // Round 7
+                (address_3.clone(), 4, address_3.clone(), 4, 100),
+                (address_2.clone(), 9, address_3.clone(), 5, 1000), // Round 8
+                (address_2.clone(), 10, address_3.clone(), 6, 1500), // Round 9
+            ];
+            assert_eq!(
+                considered_txs, expected_tx_order,
+                "Mempool should visit transactions in the correct order while ignoring past nonces",
+            );
+        },
+    );
+}
+
+/// Shared helper function to test different mempool walk strategies.
+///
+/// This function creates a test scenario with multiple addresses (10), each sending
+/// transactions with incrementing nonces (0-24) and fees (fee = 200 * (nonce + 1)).
+/// It then builds a block using the specified mempool walk strategy and validates
+/// the transaction ordering using the provided expectation function.
+///
+/// The expectation function receives the transaction index (excluding coinbase) and
+/// the complete block, and should return the expected nonce for the transaction at
+/// that position according to the specific mempool walk strategy being tested.
+fn run_mempool_walk_strategy_nonce_order_test<F>(
+    test_name: &str,
+    strategy: MemPoolWalkStrategy,
+    expected_nonce_fn: F,
+) where
+    F: Fn(usize, &StacksBlock) -> u64,
+{
+    let private_keys: Vec<_> = (0..10).map(|_| StacksPrivateKey::random()).collect();
+    let addresses: Vec<_> = private_keys
+        .iter()
+        .map(|sk| {
+            StacksAddress::from_public_keys(
+                C32_ADDRESS_VERSION_TESTNET_SINGLESIG,
+                &AddressHashMode::SerializeP2PKH,
+                1,
+                &vec![StacksPublicKey::from_private(sk)],
+            )
+            .unwrap()
+        })
+        .collect();
+
+    let initial_balances: Vec<_> = addresses
+        .iter()
+        .map(|addr| (addr.to_account_principal(), 100000000000))
+        .collect();
+
+    let mut peer_config = TestPeerConfig::new(test_name, 2030, 2031);
+    peer_config.initial_balances = initial_balances;
+    let burnchain = peer_config.burnchain.clone();
+
+    let mut peer = TestPeer::new(peer_config);
+    let chainstate_path = peer.chainstate_path.clone();
+    let mut mempool = MemPoolDB::open_test(false, 0x80000000, &chainstate_path).unwrap();
+
+    let tip =
+        SortitionDB::get_canonical_burn_chain_tip(peer.sortdb.as_ref().unwrap().conn()).unwrap();
+
+    let (burn_ops, stacks_block, microblocks) = peer.make_tenure(
+        |ref mut miner,
+         ref mut sortdb,
+         ref mut chainstate,
+         vrf_proof,
+         ref parent_opt,
+         ref parent_microblock_header_opt| {
+            let parent_tip = match parent_opt {
+                None => StacksChainState::get_genesis_header_info(chainstate.db()).unwrap(),
+                Some(block) => {
+                    let ic = sortdb.index_conn();
+                    let snapshot = SortitionDB::get_block_snapshot_for_winning_stacks_block(
+                        &ic,
+                        &tip.sortition_id,
+                        &block.block_hash(),
+                    )
+                    .unwrap()
+                    .unwrap();
+                    StacksChainState::get_anchored_block_header_info(
+                        chainstate.db(),
+                        &snapshot.consensus_hash,
+                        &snapshot.winning_stacks_block_hash,
+                    )
+                    .unwrap()
+                    .unwrap()
+                }
+            };
+
+            let parent_header_hash = parent_tip.anchored_header.block_hash();
+            let parent_consensus_hash = parent_tip.consensus_hash.clone();
+            let coinbase_tx = make_coinbase(miner, 0);
+
+            // Create 25 transactions per address with incrementing fees
+            let txs: Vec<_> = private_keys
+                .iter()
+                .flat_map(|privk| {
+                    let privk = privk.clone();
+                    (0..25).map(move |tx_nonce| {
+                        let contract = "(define-data-var bar int 0)";
+                        make_user_contract_publish(
+                            &privk,
+                            tx_nonce,
+                            200 * (tx_nonce + 1), // Higher nonce = higher fee
+                            &format!("contract-{}", tx_nonce),
+                            contract,
+                        )
+                    })
+                })
+                .collect();
+
+            for tx in txs {
+                mempool
+                    .submit(
+                        chainstate,
+                        sortdb,
+                        &parent_consensus_hash,
+                        &parent_header_hash,
+                        &tx,
+                        None,
+                        &ExecutionCost::max_value(),
+                        &StacksEpochId::Epoch20,
+                    )
+                    .unwrap();
+            }
+
+            // Build block with specified strategy
+            let mut settings = BlockBuilderSettings::limited();
+            settings.mempool_settings.strategy = strategy;
+
+            let anchored_block = StacksBlockBuilder::build_anchored_block(
+                chainstate,
+                &sortdb.index_handle_at_tip(),
+                &mut mempool,
+                &parent_tip,
+                tip.total_burn,
+                vrf_proof,
+                Hash160([0; 20]),
+                &coinbase_tx,
+                settings,
+                None,
+                &burnchain,
+            )
+            .unwrap();
+            (anchored_block.0, vec![])
+        },
+    );
+
+    peer.next_burnchain_block(burn_ops);
+    peer.process_stacks_epoch_at_tip(&stacks_block, &microblocks);
+
+    // Verify we got the expected number of transactions (250 + 1 coinbase)
+    assert_eq!(stacks_block.txs.len(), 251);
+
+    // Verify transaction ordering matches the expected strategy behavior
+    for (i, tx) in stacks_block.txs.iter().enumerate() {
+        if i == 0 {
+            let okay = matches!(tx.payload, TransactionPayload::Coinbase(..));
+            assert!(okay, "Coinbase should be first tx");
+        } else {
+            // i is 1-indexed, so we need to subtract 1 for the coinbase
+            let expected_nonce = expected_nonce_fn(i - 1, &stacks_block);
+            assert_eq!(
+                tx.get_origin_nonce(),
+                expected_nonce,
+                "{i}th transaction should have nonce = {expected_nonce} with strategy {:?}",
+                strategy
+            );
+        }
+    }
+}
+
+#[test]
+/// Tests block assembly with the `GlobalFeeRate` mempool walk strategy.
+///
+/// Scenario: 10 accounts, 25 transactions each (nonces 0-24), fees increase with nonce.
+///
+/// Expected Behavior:
+/// This strategy selects the highest-fee *ready* transaction globally.
+/// Since transaction fees are `200 * (nonce + 1)`, an account's nonce `N+1`
+/// transaction has a higher fee than its nonce `N` transaction.
+/// Consequently, after Account A's nonce 0 transaction is processed, its now-ready
+/// nonce 1 transaction (fee `200*2=400`) will be preferred over Account B's
+/// pending nonce 0 transaction (fee `200*1=200`).
+/// This results in one account's transactions being processed sequentially
+/// (e.g., A0, A1, ..., A24) before moving to the next account (B0, B1, ..., B24).
+fn test_build_anchored_blocks_nonce_order_global_fee_rate_strategy() {
+    run_mempool_walk_strategy_nonce_order_test(
+        function_name!(),
+        MemPoolWalkStrategy::GlobalFeeRate,
+        // Expected: 0,1,..,24 (for acc1), then 0,1,..,24 (for acc2), ...
+        |tx_index, _| (tx_index % 25) as u64,
+    );
+}
+
+#[test]
+/// Tests block assembly with the `NextNonceWithHighestFeeRate` mempool walk strategy.
+///
+/// Scenario: 10 accounts, 25 transactions each (nonces 0-24), fees increase with nonce.
+///
+/// Expected Behavior:
+/// This strategy prioritizes transactions that match the next expected nonce for each
+/// account, then (secondarily) by fee rate within that group of "next nonce" transactions.
+/// This directly results in transactions being ordered by "nonce rounds" in the block:
+/// all nonce 0 transactions from all accounts first, then all nonce 1s, and so on.
+fn test_build_anchored_blocks_nonce_order_next_nonce_with_highest_fee_rate_strategy() {
+    run_mempool_walk_strategy_nonce_order_test(
+        function_name!(),
+        MemPoolWalkStrategy::NextNonceWithHighestFeeRate,
+        |tx_index, _| {
+            // Expected nonce sequence: 0,0,...,0 (10 times), then 1,1,...,1 (10 times), ...
+            // Each group of 10 transactions corresponds to one nonce value, across all 10 accounts.
+            (tx_index / 10) as u64
         },
     );
 }

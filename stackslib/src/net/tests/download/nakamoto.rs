@@ -23,8 +23,6 @@ use stacks_common::types::chainstate::{
     ConsensusHash, StacksAddress, StacksBlockId, StacksPrivateKey, TrieHash,
 };
 use stacks_common::types::net::PeerAddress;
-use stacks_common::types::StacksEpochId;
-use stacks_common::util::get_epoch_time_secs;
 use stacks_common::util::hash::{hex_bytes, Sha512Trunc256Sum};
 use stacks_common::util::secp256k1::MessageSignature;
 use stacks_common::util::vrf::VRFProof;
@@ -36,17 +34,17 @@ use crate::chainstate::nakamoto::test_signers::TestSigners;
 use crate::chainstate::nakamoto::{
     NakamotoBlock, NakamotoBlockHeader, NakamotoChainState, NakamotoStagingBlocksConnRef,
 };
-use crate::chainstate::stacks::db::{StacksChainState, StacksHeaderInfo};
 use crate::chainstate::stacks::{
     CoinbasePayload, Error as ChainstateError, StacksTransaction, TenureChangeCause,
     TenureChangePayload, TokenTransferMemo, TransactionAnchorMode, TransactionAuth,
     TransactionPayload, TransactionVersion,
 };
 use crate::clarity::vm::types::StacksAddressExtensions;
+use crate::core::test_util::to_addr;
 use crate::net::api::gettenureinfo::RPCGetTenureInfo;
 use crate::net::download::nakamoto::{TenureStartEnd, WantedTenure, *};
 use crate::net::inv::nakamoto::NakamotoTenureInv;
-use crate::net::test::{dns_thread_start, to_addr, TestEventObserver};
+use crate::net::test::{dns_thread_start, TestEventObserver};
 use crate::net::tests::inv::nakamoto::{
     make_nakamoto_peer_from_invs, make_nakamoto_peers_from_invs_ext, peer_get_nakamoto_invs,
 };
@@ -292,6 +290,7 @@ fn test_nakamoto_tenure_downloader() {
         naddr,
         reward_set.clone(),
         reward_set,
+        false,
     );
 
     // must be first block
@@ -1174,7 +1173,7 @@ fn test_tenure_start_end_from_inventory() {
         .unwrap();
         let bits = invs.tenures_inv.get(&rc).unwrap();
         for (i, wt) in wanted_tenures.iter().enumerate() {
-            if i >= (rc_len - 1).into() {
+            if i >= usize::from(rc_len - 1) {
                 // nothing here
                 assert!(!available.contains_key(&wt.tenure_id_consensus_hash));
                 continue;

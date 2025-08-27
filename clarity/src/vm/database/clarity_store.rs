@@ -14,14 +14,13 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-#[cfg(feature = "canonical")]
+#[cfg(feature = "rusqlite")]
 use rusqlite::Connection;
 use stacks_common::types::chainstate::{StacksBlockId, TrieHash};
 use stacks_common::util::hash::{hex_bytes, to_hex, Sha512Trunc256Sum};
 
 use crate::vm::analysis::AnalysisDatabase;
 use crate::vm::contexts::GlobalContext;
-#[cfg(feature = "canonical")]
 use crate::vm::database::{
     ClarityDatabase, ClarityDeserializable, ClaritySerializable, NULL_BURN_STATE_DB, NULL_HEADER_DB,
 };
@@ -85,7 +84,7 @@ pub trait ClarityBackingStore {
     fn get_open_chain_tip_height(&mut self) -> u32;
     fn get_open_chain_tip(&mut self) -> StacksBlockId;
 
-    #[cfg(feature = "canonical")]
+    #[cfg(feature = "rusqlite")]
     fn get_side_store(&mut self) -> &Connection;
 
     fn get_cc_special_cases_handler(&self) -> Option<SpecialCaseHandler> {
@@ -144,7 +143,7 @@ pub trait ClarityBackingStore {
 
 // TODO: Figure out where this belongs
 pub fn make_contract_hash_key(contract: &QualifiedContractIdentifier) -> String {
-    format!("clarity-contract::{}", contract)
+    format!("clarity-contract::{contract}")
 }
 
 pub struct ContractCommitment {
@@ -188,11 +187,11 @@ impl NullBackingStore {
         NullBackingStore {}
     }
 
-    pub fn as_clarity_db(&mut self) -> ClarityDatabase {
+    pub fn as_clarity_db(&mut self) -> ClarityDatabase<'_> {
         ClarityDatabase::new(self, &NULL_HEADER_DB, &NULL_BURN_STATE_DB)
     }
 
-    pub fn as_analysis_db(&mut self) -> AnalysisDatabase {
+    pub fn as_analysis_db(&mut self) -> AnalysisDatabase<'_> {
         AnalysisDatabase::new(self)
     }
 }
@@ -222,7 +221,7 @@ impl ClarityBackingStore for NullBackingStore {
         panic!("NullBackingStore can't retrieve data")
     }
 
-    #[cfg(feature = "canonical")]
+    #[cfg(feature = "rusqlite")]
     fn get_side_store(&mut self) -> &Connection {
         panic!("NullBackingStore has no side store")
     }

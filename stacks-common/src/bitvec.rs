@@ -14,7 +14,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-#[cfg(feature = "canonical")]
+#[cfg(feature = "rusqlite")]
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
 use serde::{Deserialize, Serialize};
 
@@ -106,7 +106,7 @@ impl<'de, const MAX_SIZE: u16> Deserialize<'de> for BitVec<MAX_SIZE> {
     }
 }
 
-#[cfg(feature = "canonical")]
+#[cfg(feature = "rusqlite")]
 impl<const MAX_SIZE: u16> FromSql for BitVec<MAX_SIZE> {
     fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
         let bytes = hex_bytes(value.as_str()?).map_err(|e| FromSqlError::Other(Box::new(e)))?;
@@ -115,7 +115,7 @@ impl<const MAX_SIZE: u16> FromSql for BitVec<MAX_SIZE> {
     }
 }
 
-#[cfg(feature = "canonical")]
+#[cfg(feature = "rusqlite")]
 impl<const MAX_SIZE: u16> ToSql for BitVec<MAX_SIZE> {
     fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
         let hex = bytes_to_hex(self.serialize_to_vec().as_slice());
@@ -171,7 +171,7 @@ impl<const MAX_SIZE: u16> BitVec<MAX_SIZE> {
         Ok(bitvec)
     }
 
-    pub fn iter(&self) -> BitVecIter<MAX_SIZE> {
+    pub fn iter(&self) -> BitVecIter<'_, MAX_SIZE> {
         let byte = self.data.first();
         BitVecIter {
             index: 0,
@@ -246,7 +246,7 @@ impl<const MAX_SIZE: u16> BitVec<MAX_SIZE> {
             .data
             .into_iter()
             .fold(String::new(), |acc, byte| {
-                acc + &format!("{:08b}", byte).chars().rev().collect::<String>()
+                acc + &format!("{byte:08b}").chars().rev().collect::<String>()
             })
             .chars()
             .take(self.len() as usize)

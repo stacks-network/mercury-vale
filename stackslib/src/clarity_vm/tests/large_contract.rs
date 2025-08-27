@@ -17,30 +17,23 @@
 use clarity::vm::ast::stack_depth_checker::AST_CALL_STACK_DEPTH_BUFFER;
 use clarity::vm::ast::{self, ASTRules};
 use clarity::vm::clarity::{ClarityConnection, TransactionConnection};
-use clarity::vm::contexts::{Environment, GlobalContext, OwnedEnvironment};
-use clarity::vm::contracts::Contract;
-use clarity::vm::costs::ExecutionCost;
-use clarity::vm::database::{ClarityDatabase, HeadersDB};
-use clarity::vm::errors::{CheckErrors, Error as InterpreterError, Error, RuntimeErrorType};
-use clarity::vm::representations::SymbolicExpression;
+use clarity::vm::contexts::OwnedEnvironment;
+use clarity::vm::database::HeadersDB;
+use clarity::vm::errors::Error as InterpreterError;
 use clarity::vm::test_util::*;
 use clarity::vm::tests::{test_clarity_versions, BurnStateDB};
-use clarity::vm::types::{
-    OptionalData, PrincipalData, QualifiedContractIdentifier, ResponseData, StandardPrincipalData,
-    TypeSignature, Value,
-};
+use clarity::vm::types::{PrincipalData, QualifiedContractIdentifier, Value};
 use clarity::vm::version::ClarityVersion;
 use clarity::vm::{ContractContext, MAX_CALL_STACK_DEPTH};
 #[cfg(test)]
 use rstest::rstest;
 #[cfg(test)]
 use rstest_reuse::{self, *};
-use stacks_common::consts::{CHAIN_ID_MAINNET, CHAIN_ID_TESTNET};
-use stacks_common::types::chainstate::{BlockHeaderHash, StacksBlockId};
+use stacks_common::consts::CHAIN_ID_TESTNET;
+use stacks_common::types::chainstate::StacksBlockId;
 use stacks_common::types::StacksEpochId;
-use stacks_common::util::hash::hex_bytes;
 
-use crate::chainstate::stacks::boot::{BOOT_CODE_COSTS, BOOT_CODE_COSTS_2, BOOT_CODE_COSTS_3};
+use crate::chainstate::stacks::boot::{BOOT_CODE_COSTS_2, BOOT_CODE_COSTS_3};
 use crate::chainstate::stacks::index::ClarityMarfTrieId;
 use crate::clarity_vm::clarity::{ClarityBlockConnection, ClarityInstance, Error as ClarityError};
 use crate::clarity_vm::database::marf::MarfedKV;
@@ -159,7 +152,8 @@ fn test_simple_token_system(#[case] version: ClarityVersion, #[case] epoch: Stac
                     &ast,
                     BOOT_CODE_COSTS_2,
                     None,
-                    |_, _| false,
+                    |_, _| None,
+                    None,
                 )
                 .unwrap();
             }
@@ -169,7 +163,8 @@ fn test_simple_token_system(#[case] version: ClarityVersion, #[case] epoch: Stac
             | StacksEpochId::Epoch24
             | StacksEpochId::Epoch25
             | StacksEpochId::Epoch30
-            | StacksEpochId::Epoch31 => {
+            | StacksEpochId::Epoch31
+            | StacksEpochId::Epoch32 => {
                 let (ast, _analysis) = tx
                     .analyze_smart_contract(
                         &boot_code_id("costs-3", false),
@@ -184,7 +179,8 @@ fn test_simple_token_system(#[case] version: ClarityVersion, #[case] epoch: Stac
                     &ast,
                     BOOT_CODE_COSTS_3,
                     None,
-                    |_, _| false,
+                    |_, _| None,
+                    None,
                 )
                 .unwrap();
             }
@@ -221,7 +217,8 @@ fn test_simple_token_system(#[case] version: ClarityVersion, #[case] epoch: Stac
                 &contract_ast,
                 tokens_contract,
                 None,
-                |_, _| false,
+                |_, _| None,
+                None,
             )
             .unwrap()
         });
@@ -234,7 +231,8 @@ fn test_simple_token_system(#[case] version: ClarityVersion, #[case] epoch: Stac
                     &contract_identifier,
                     "token-transfer",
                     &[p1.clone().into(), Value::UInt(210)],
-                    |_, _| false
+                    |_, _| None,
+                    None
                 ))
                 .unwrap()
                 .0
@@ -247,7 +245,8 @@ fn test_simple_token_system(#[case] version: ClarityVersion, #[case] epoch: Stac
                     &contract_identifier,
                     "token-transfer",
                     &[p2.clone().into(), Value::UInt(9000)],
-                    |_, _| false
+                    |_, _| None,
+                    None
                 ))
                 .unwrap()
                 .0
@@ -261,7 +260,8 @@ fn test_simple_token_system(#[case] version: ClarityVersion, #[case] epoch: Stac
                     &contract_identifier,
                     "token-transfer",
                     &[p2.clone().into(), Value::UInt(1001)],
-                    |_, _| false
+                    |_, _| None,
+                    None
                 ))
                 .unwrap()
                 .0
@@ -269,7 +269,7 @@ fn test_simple_token_system(#[case] version: ClarityVersion, #[case] epoch: Stac
         assert!(is_committed(
             & // send to self!
             block.as_transaction(|tx| tx.run_contract_call(&p1, None, &contract_identifier, "token-transfer",
-                                    &[p1.clone().into(), Value::UInt(1000)], |_, _| false)).unwrap().0
+                                    &[p1.clone().into(), Value::UInt(1000)], |_, _| None, None)).unwrap().0
         ));
 
         assert_eq!(
@@ -299,7 +299,8 @@ fn test_simple_token_system(#[case] version: ClarityVersion, #[case] epoch: Stac
                     &contract_identifier,
                     "faucet",
                     &[],
-                    |_, _| false
+                    |_, _| None,
+                    None
                 ))
                 .unwrap()
                 .0
@@ -313,7 +314,8 @@ fn test_simple_token_system(#[case] version: ClarityVersion, #[case] epoch: Stac
                     &contract_identifier,
                     "faucet",
                     &[],
-                    |_, _| false
+                    |_, _| None,
+                    None
                 ))
                 .unwrap()
                 .0
@@ -327,7 +329,8 @@ fn test_simple_token_system(#[case] version: ClarityVersion, #[case] epoch: Stac
                     &contract_identifier,
                     "faucet",
                     &[],
-                    |_, _| false
+                    |_, _| None,
+                    None
                 ))
                 .unwrap()
                 .0
@@ -351,7 +354,8 @@ fn test_simple_token_system(#[case] version: ClarityVersion, #[case] epoch: Stac
                     &contract_identifier,
                     "mint-after",
                     &[Value::UInt(25)],
-                    |_, _| false
+                    |_, _| None,
+                    None
                 ))
                 .unwrap()
                 .0
@@ -388,7 +392,8 @@ fn test_simple_token_system(#[case] version: ClarityVersion, #[case] epoch: Stac
                     &contract_identifier,
                     "mint-after",
                     &[Value::UInt(25)],
-                    |_, _| false
+                    |_, _| None,
+                    None
                 ))
                 .unwrap()
                 .0
@@ -402,7 +407,8 @@ fn test_simple_token_system(#[case] version: ClarityVersion, #[case] epoch: Stac
                     &contract_identifier,
                     "faucet",
                     &[],
-                    |_, _| false
+                    |_, _| None,
+                    None
                 ))
                 .unwrap()
                 .0
@@ -425,7 +431,8 @@ fn test_simple_token_system(#[case] version: ClarityVersion, #[case] epoch: Stac
                     &contract_identifier,
                     "my-get-token-balance",
                     &[p1.clone().into()],
-                    |_, _| false
+                    |_, _| None,
+                    None
                 ))
                 .unwrap()
                 .0,
@@ -747,7 +754,8 @@ pub fn rollback_log_memory_test(
                     &ct_ast,
                     &contract,
                     None,
-                    |_, _| { false }
+                    |_, _| None,
+                    None
                 )
                 .unwrap_err()
             )
@@ -823,7 +831,8 @@ pub fn let_memory_test(#[case] clarity_version: ClarityVersion, #[case] epoch_id
                     &ct_ast,
                     &contract,
                     None,
-                    |_, _| { false }
+                    |_, _| None,
+                    None
                 )
                 .unwrap_err()
             )
@@ -902,7 +911,8 @@ pub fn argument_memory_test(
                     &ct_ast,
                     &contract,
                     None,
-                    |_, _| { false }
+                    |_, _| None,
+                    None
                 )
                 .unwrap_err()
             )
@@ -997,11 +1007,12 @@ pub fn fcall_memory_test(#[case] clarity_version: ClarityVersion, #[case] epoch_
                     &ct_ast,
                     &contract_ok,
                     None,
-                    |_, _| true
+                    |_, _| Some("abort".to_string()),
+                    None
                 )
                 .unwrap_err()
             {
-                ClarityError::AbortedByCallback(..) => true,
+                ClarityError::AbortedByCallback { .. } => true,
                 _ => false,
             });
         });
@@ -1023,7 +1034,8 @@ pub fn fcall_memory_test(#[case] clarity_version: ClarityVersion, #[case] epoch_
                     &ct_ast,
                     &contract_err,
                     None,
-                    |_, _| false
+                    |_, _| None,
+                    None
                 )
                 .unwrap_err()
             )
@@ -1109,7 +1121,8 @@ pub fn ccall_memory_test(#[case] clarity_version: ClarityVersion, #[case] epoch_
                         &ct_ast,
                         &contract,
                         None,
-                        |_, _| false,
+                        |_, _| None,
+                        None,
                     )
                     .unwrap();
                     conn.save_analysis(&contract_identifier, &ct_analysis)
@@ -1133,7 +1146,8 @@ pub fn ccall_memory_test(#[case] clarity_version: ClarityVersion, #[case] epoch_
                             &ct_ast,
                             &contract,
                             None,
-                            |_, _| false
+                            |_, _| None,
+                            None
                         )
                         .unwrap_err()
                     )

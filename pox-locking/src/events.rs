@@ -21,9 +21,6 @@ use clarity::vm::errors::Error as ClarityError;
 use clarity::vm::types::{PrincipalData, QualifiedContractIdentifier, ResponseData, TupleData};
 use clarity::vm::Value;
 #[cfg(any(test, feature = "testing"))]
-use slog::slog_debug;
-use slog::slog_error;
-#[cfg(any(test, feature = "testing"))]
 use stacks_common::debug;
 use stacks_common::types::StacksEpochId;
 use stacks_common::{error, test_debug};
@@ -87,7 +84,7 @@ fn create_event_info_aggregation_code(function_name: &str) -> String {
         )
             {{
                 ;; Function name
-                name: "{func_name}",
+                name: "{function_name}",
                 ;; who called this
                 ;; NOTE: these fields are required by downstream clients.
                 ;; Even though tx-sender is *not* a stacker, the field is
@@ -100,8 +97,7 @@ fn create_event_info_aggregation_code(function_name: &str) -> String {
 
             }}
         )
-        "#,
-        func_name = function_name
+        "#
     )
 }
 

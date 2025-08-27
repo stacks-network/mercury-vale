@@ -17,6 +17,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::mem::replace;
+use std::time::{Duration, Instant};
 
 use hashbrown::{HashMap, HashSet};
 use serde::Serialize;
@@ -101,8 +102,8 @@ impl AssetMap {
             .iter()
             .map(|(principal, amount)| {
                 (
-                    format!("{}", principal),
-                    serde_json::value::Value::String(format!("{}", amount)),
+                    format!("{principal}"),
+                    serde_json::value::Value::String(format!("{amount}")),
                 )
             })
             .collect();
@@ -112,8 +113,8 @@ impl AssetMap {
             .iter()
             .map(|(principal, amount)| {
                 (
-                    format!("{}", principal),
-                    serde_json::value::Value::String(format!("{}", amount)),
+                    format!("{principal}"),
+                    serde_json::value::Value::String(format!("{amount}")),
                 )
             })
             .collect();
@@ -126,14 +127,14 @@ impl AssetMap {
                     .iter()
                     .map(|(asset_id, amount)| {
                         (
-                            format!("{}", asset_id),
-                            serde_json::value::Value::String(format!("{}", amount)),
+                            format!("{asset_id}"),
+                            serde_json::value::Value::String(format!("{amount}")),
                         )
                     })
                     .collect();
 
                 (
-                    format!("{}", principal),
+                    format!("{principal}"),
                     serde_json::value::Value::Object(token_json),
                 )
             })
@@ -149,19 +150,19 @@ impl AssetMap {
                         let nft_array = nft_values
                             .iter()
                             .map(|nft_value| {
-                                serde_json::value::Value::String(format!("{}", nft_value))
+                                serde_json::value::Value::String(format!("{nft_value}"))
                             })
                             .collect();
 
                         (
-                            format!("{}", asset_id),
+                            format!("{asset_id}"),
                             serde_json::value::Value::Array(nft_array),
                         )
                     })
                     .collect();
 
                 (
-                    format!("{}", principal),
+                    format!("{principal}"),
                     serde_json::value::Value::Object(nft_json),
                 )
             })
@@ -179,6 +180,17 @@ impl AssetMap {
 #[derive(Debug, Clone, Default)]
 pub struct EventBatch {
     pub events: Vec<StacksTransactionEvent>,
+}
+
+/** ExecutionTimeTracker keeps track of how much time a contract call is taking.
+   It is checked at every eval call.
+*/
+pub enum ExecutionTimeTracker {
+    NoTracking,
+    MaxTime {
+        start_time: Instant,
+        max_duration: Duration,
+    },
 }
 
 /** GlobalContext represents the outermost context for a single transaction's
@@ -199,6 +211,7 @@ pub struct GlobalContext<'a, 'hooks> {
     /// This is the chain ID of the transaction
     pub chain_id: u32,
     pub eval_hooks: Option<Vec<&'hooks mut dyn EvalHook>>,
+    pub execution_time_tracker: ExecutionTimeTracker,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -508,10 +521,7 @@ impl<'a, 'hooks> OwnedEnvironment<'a, 'hooks> {
         let version = ClarityVersion::default_for_epoch(epoch);
         database.roll_back().unwrap();
 
-        debug!(
-            "Begin OwnedEnvironment(epoch = {}, version = {})",
-            &epoch, &version
-        );
+        debug!("Begin OwnedEnvironment(epoch = {epoch}, version = {version})");
         OwnedEnvironment {
             context: GlobalContext::new(
                 false,
@@ -797,6 +807,11 @@ impl<'a, 'hooks> OwnedEnvironment<'a, 'hooks> {
 
     pub fn get_cost_total(&self) -> ExecutionCost {
         self.context.cost_track.get_total()
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    pub fn mut_cost_tracker(&mut self) -> &mut LimitedCostTracker {
+        &mut self.context.cost_track
     }
 
     /// Destroys this environment, returning ownership of its database reference.
@@ -1112,8 +1127,7 @@ impl<'a, 'b, 'hooks> Environment<'a, 'b, 'hooks> {
             let args: Result<Vec<Value>> = args.iter()
                 .map(|arg| {
                     let value = arg.match_atom_value()
-                        .ok_or_else(|| InterpreterError::InterpreterError(format!("Passed non-value expression to exec_tx on {}!",
-                                                                                  tx_name)))?;
+                        .ok_or_else(|| InterpreterError::InterpreterError(format!("Passed non-value expression to exec_tx on {tx_name}!")))?;
                     // sanitize contract-call inputs in epochs >= 2.4
                     // testing todo: ensure sanitize_value() preserves trait callability!
                     let expected_type = TypeSignature::type_of(value)?;
@@ -1548,11 +1562,19 @@ impl<'a, 'hooks> GlobalContext<'a, 'hooks> {
             epoch_id,
             chain_id,
             eval_hooks: None,
+            execution_time_tracker: ExecutionTimeTracker::NoTracking,
         }
     }
 
     pub fn is_top_level(&self) -> bool {
         self.asset_maps.is_empty()
+    }
+
+    pub fn set_max_execution_time(&mut self, max_execution_time: Duration) {
+        self.execution_time_tracker = ExecutionTimeTracker::MaxTime {
+            start_time: Instant::now(),
+            max_duration: max_execution_time,
+        }
     }
 
     fn get_asset_map(&mut self) -> Result<&mut AssetMap> {
@@ -1853,7 +1875,7 @@ impl<'a> LocalContext<'a> {
         self.depth
     }
 
-    pub fn function_context(&self) -> &LocalContext {
+    pub fn function_context(&self) -> &LocalContext<'_> {
         match self.function_context {
             Some(context) => context,
             None => self,
