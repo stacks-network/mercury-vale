@@ -24,7 +24,6 @@ use ::secp256k1::{
     constants as LibSecp256k1Constants, Error as LibSecp256k1Error, Message as LibSecp256k1Message,
     PublicKey as LibSecp256k1PublicKey, Secp256k1, SecretKey as LibSecp256k1PrivateKey,
 };
-use rand::RngCore;
 use serde::de::{Deserialize, Error as de_Error};
 use serde::Serialize;
 
@@ -35,7 +34,7 @@ use crate::util::hash::{hex_bytes, to_hex, Sha256Sum};
 // per-thread Secp256k1 context
 thread_local!(static _secp256k1: Secp256k1<secp256k1::All> = Secp256k1::new());
 
-#[derive(Debug, PartialEq, Eq, Clone, Copy, Serialize, Deserialize, Hash)]
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize, Hash)]
 pub struct Secp256k1PublicKey {
     // serde is broken for secp256k1, so do it ourselves
     #[serde(
@@ -46,7 +45,7 @@ pub struct Secp256k1PublicKey {
     compressed: bool,
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 pub struct Secp256k1PrivateKey {
     // serde is broken for secp256k1, so do it ourselves
     #[serde(
@@ -240,7 +239,10 @@ impl PublicKey for Secp256k1PublicKey {
 }
 
 impl Secp256k1PrivateKey {
+    #[cfg(feature = "rand")]
     pub fn random() -> Secp256k1PrivateKey {
+        use rand::RngCore as _;
+
         let mut rng = rand::thread_rng();
         loop {
             // keep trying to generate valid bytes
@@ -422,6 +424,7 @@ pub fn secp256k1_verify(
 
 #[cfg(test)]
 mod tests {
+    use rand::RngCore as _;
     use secp256k1;
     use secp256k1::{PublicKey as LibSecp256k1PublicKey, Secp256k1};
 
@@ -465,7 +468,7 @@ mod tests {
             .unwrap()
             .compress_public());
 
-        assert_eq!(Secp256k1PrivateKey::from_hex(&h_uncomp), Ok(t1));
+        assert_eq!(Secp256k1PrivateKey::from_hex(&h_uncomp), Ok(t1.clone()));
 
         t1.set_compress_public(true);
 
@@ -612,15 +615,13 @@ mod tests {
                 (Err(e1), Err(e2)) => assert_eq!(e1, e2),
                 (Err(e1), _) => {
                     test_debug!("Failed to verify signature: {}", e1);
-                    assert!(
-                        false,
+                    panic!(
                         "failed fixture (verification: {:?}): {:#?}",
                         &ver_res, &fixture
                     );
                 }
                 (_, _) => {
-                    assert!(
-                        false,
+                    panic!(
                         "failed fixture (verification: {:?}): {:#?}",
                         &ver_res, &fixture
                     );

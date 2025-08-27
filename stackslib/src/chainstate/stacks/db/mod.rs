@@ -18,44 +18,39 @@ use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, HashSet};
 use std::io::prelude::*;
 use std::ops::{Deref, DerefMut};
-use std::path::{Path, PathBuf};
-use std::{fmt, fs, io};
+use std::path::PathBuf;
+use std::{fs, io};
 
 use clarity::vm::analysis::analysis_db::AnalysisDatabase;
-use clarity::vm::analysis::run_analysis;
 use clarity::vm::ast::ASTRules;
 use clarity::vm::clarity::TransactionConnection;
-use clarity::vm::contexts::OwnedEnvironment;
 use clarity::vm::costs::{ExecutionCost, LimitedCostTracker};
 use clarity::vm::database::{
-    BurnStateDB, ClarityDatabase, HeadersDB, STXBalance, SqliteConnection, NULL_BURN_STATE_DB,
+    BurnStateDB, ClarityDatabase, HeadersDB, STXBalance, NULL_BURN_STATE_DB,
 };
 use clarity::vm::events::*;
-use clarity::vm::representations::{ClarityName, ContractName};
+use clarity::vm::representations::ContractName;
 use clarity::vm::types::TupleData;
 use clarity::vm::{SymbolicExpression, Value};
-use lazy_static::lazy_static;
-use rusqlite::types::ToSql;
-use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Row, Transaction};
+use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::de::Error as de_Error;
 use serde::Deserialize;
 use stacks_common::codec::{read_next, write_next, StacksMessageCodec};
 use stacks_common::types::chainstate::{StacksAddress, StacksBlockId, TrieHash};
 use stacks_common::types::sqlite::NO_PARAMS;
-use stacks_common::util;
 use stacks_common::util::hash::{hex_bytes, to_hex};
 
-use crate::burnchains::bitcoin::address::{BitcoinAddress, LegacyBitcoinAddress};
+use crate::burnchains::bitcoin::address::LegacyBitcoinAddress;
 use crate::burnchains::{Address, Burnchain, BurnchainParameters, PoxConstants};
-use crate::chainstate::burn::db::sortdb::{BlockHeaderCache, SortitionDB, SortitionDBConn, *};
+use crate::chainstate::burn::db::sortdb::SortitionDB;
 use crate::chainstate::burn::operations::{
     DelegateStxOp, StackStxOp, TransferStxOp, VoteForAggregateKeyOp,
 };
 use crate::chainstate::burn::{ConsensusHash, ConsensusHashExtensions};
 use crate::chainstate::nakamoto::{
-    HeaderTypeNames, NakamotoBlock, NakamotoBlockHeader, NakamotoChainState,
-    NakamotoStagingBlocksConn, NAKAMOTO_CHAINSTATE_SCHEMA_1, NAKAMOTO_CHAINSTATE_SCHEMA_2,
-    NAKAMOTO_CHAINSTATE_SCHEMA_3, NAKAMOTO_CHAINSTATE_SCHEMA_4, NAKAMOTO_CHAINSTATE_SCHEMA_5,
+    HeaderTypeNames, NakamotoBlockHeader, NakamotoChainState, NakamotoStagingBlocksConn,
+    NAKAMOTO_CHAINSTATE_SCHEMA_1, NAKAMOTO_CHAINSTATE_SCHEMA_2, NAKAMOTO_CHAINSTATE_SCHEMA_3,
+    NAKAMOTO_CHAINSTATE_SCHEMA_4, NAKAMOTO_CHAINSTATE_SCHEMA_5, NAKAMOTO_CHAINSTATE_SCHEMA_6,
 };
 use crate::chainstate::stacks::address::StacksAddressExtensions;
 use crate::chainstate::stacks::boot::*;
@@ -63,12 +58,8 @@ use crate::chainstate::stacks::db::accounts::*;
 use crate::chainstate::stacks::db::blocks::*;
 use crate::chainstate::stacks::db::unconfirmed::UnconfirmedState;
 use crate::chainstate::stacks::events::*;
-use crate::chainstate::stacks::index::marf::{
-    MARFOpenOpts, MarfConnection, BLOCK_HASH_TO_HEIGHT_MAPPING_KEY,
-    BLOCK_HEIGHT_TO_HASH_MAPPING_KEY, MARF,
-};
-use crate::chainstate::stacks::index::storage::TrieFileStorage;
-use crate::chainstate::stacks::index::{ClarityMarfTrieId, MARFValue, MarfTrieId};
+use crate::chainstate::stacks::index::marf::{MARFOpenOpts, MarfConnection, MARF};
+use crate::chainstate::stacks::index::ClarityMarfTrieId;
 use crate::chainstate::stacks::{
     Error, StacksBlockHeader, StacksMicroblockHeader, C32_ADDRESS_VERSION_MAINNET_MULTISIG,
     C32_ADDRESS_VERSION_MAINNET_SINGLESIG, C32_ADDRESS_VERSION_TESTNET_MULTISIG,
@@ -83,11 +74,9 @@ use crate::clarity_vm::database::HeadersDBConn;
 use crate::core::*;
 use crate::monitoring;
 use crate::net::atlas::BNS_CHARS_REGEX;
-use crate::net::Error as net_error;
 use crate::util_lib::boot::{boot_code_acc, boot_code_addr, boot_code_id, boot_code_tx_auth};
 use crate::util_lib::db::{
-    query_count, query_row, tx_begin_immediate, tx_busy_handler, DBConn, DBTx, Error as db_error,
-    FromColumn, FromRow, IndexDBConn, IndexDBTx,
+    query_row, DBConn, DBTx, Error as db_error, FromColumn, FromRow, IndexDBConn, IndexDBTx,
 };
 
 pub mod accounts;
@@ -294,15 +283,16 @@ impl DBConfig {
         });
         match epoch_id {
             StacksEpochId::Epoch10 => true,
-            StacksEpochId::Epoch20 => version_u32 >= 1 && version_u32 <= 8,
-            StacksEpochId::Epoch2_05 => version_u32 >= 2 && version_u32 <= 8,
-            StacksEpochId::Epoch21 => version_u32 >= 3 && version_u32 <= 8,
-            StacksEpochId::Epoch22 => version_u32 >= 3 && version_u32 <= 8,
-            StacksEpochId::Epoch23 => version_u32 >= 3 && version_u32 <= 8,
-            StacksEpochId::Epoch24 => version_u32 >= 3 && version_u32 <= 8,
-            StacksEpochId::Epoch25 => version_u32 >= 3 && version_u32 <= 8,
-            StacksEpochId::Epoch30 => version_u32 >= 3 && version_u32 <= 8,
-            StacksEpochId::Epoch31 => version_u32 >= 3 && version_u32 <= 8,
+            StacksEpochId::Epoch20 => version_u32 >= 1 && version_u32 <= 10,
+            StacksEpochId::Epoch2_05 => version_u32 >= 2 && version_u32 <= 10,
+            StacksEpochId::Epoch21 => version_u32 >= 3 && version_u32 <= 10,
+            StacksEpochId::Epoch22 => version_u32 >= 3 && version_u32 <= 10,
+            StacksEpochId::Epoch23 => version_u32 >= 3 && version_u32 <= 10,
+            StacksEpochId::Epoch24 => version_u32 >= 3 && version_u32 <= 10,
+            StacksEpochId::Epoch25 => version_u32 >= 3 && version_u32 <= 10,
+            StacksEpochId::Epoch30 => version_u32 >= 3 && version_u32 <= 10,
+            StacksEpochId::Epoch31 => version_u32 >= 3 && version_u32 <= 10,
+            StacksEpochId::Epoch32 => version_u32 >= 3 && version_u32 <= 10,
         }
     }
 }
@@ -654,7 +644,7 @@ impl<'a> DerefMut for ChainstateTx<'a> {
     }
 }
 
-pub const CHAINSTATE_VERSION: &str = "8";
+pub const CHAINSTATE_VERSION: &str = "10";
 
 const CHAINSTATE_INITIAL_SCHEMA: &[&str] = &[
     "PRAGMA foreign_keys = ON;",
@@ -671,9 +661,9 @@ const CHAINSTATE_INITIAL_SCHEMA: &[&str] = &[
         tx_merkle_root TEXT NOT NULL,
         state_index_root TEXT NOT NULL,
         microblock_pubkey_hash TEXT NOT NULL,
-        
+
         block_hash TEXT NOT NULL,                   -- NOTE: this is *not* unique, since two burn chain forks can commit to the same Stacks block.
-        index_block_hash TEXT UNIQUE NOT NULL,      -- NOTE: this is the hash of the block hash and consensus hash of the burn block that selected it, 
+        index_block_hash TEXT UNIQUE NOT NULL,      -- NOTE: this is the hash of the block hash and consensus hash of the burn block that selected it,
                                                     -- and is guaranteed to be globally unique (across all Stacks forks and across all PoX forks).
                                                     -- index_block_hash is the block hash fed into the MARF index.
 
@@ -708,7 +698,7 @@ const CHAINSTATE_INITIAL_SCHEMA: &[&str] = &[
         burnchain_commit_burn INT NOT NULL,
         burnchain_sortition_burn INT NOT NULL,
         miner INT NOT NULL,
-        
+
         -- internal use
         stacks_block_height INTEGER NOT NULL,
         index_block_hash TEXT NOT NULL,     -- NOTE: can't enforce UNIQUE here, because there will be multiple entries per block
@@ -809,7 +799,7 @@ const CHAINSTATE_SCHEMA_3: &[&str] = &[
     -- * one that records the coinbase, anchored tx fee, and confirmed streamed tx fees, and
     -- * one that records only the produced streamed tx fees.
     -- The latter is determined once this block's stream gets subsequently confirmed.
-    -- You query this table by passing both the parent and the child block hashes, since both the 
+    -- You query this table by passing both the parent and the child block hashes, since both the
     -- parent and child blocks determine the full reward for the parent block.
     CREATE TABLE matured_rewards(
         address TEXT NOT NULL,      -- address of the miner who produced the block
@@ -820,7 +810,7 @@ const CHAINSTATE_SCHEMA_3: &[&str] = &[
         tx_fees_streamed_confirmed TEXT NOT NULL,
         tx_fees_streamed_produced TEXT NOT NULL,
 
-        -- fork identifier 
+        -- fork identifier
         child_index_block_hash TEXT NOT NULL,
         parent_index_block_hash TEXT NOT NULL,
 
@@ -853,6 +843,15 @@ const CHAINSTATE_SCHEMA_3: &[&str] = &[
     "#,
 ];
 
+const CHAINSTATE_SCHEMA_4: &[&str] = &[
+    // schema change is JUST a new index, so just bump db_config.version
+    //   and add the index to `CHAINSTATE_INDEXES` (which gets re-execed
+    //   on every schema change)
+    r#"
+    UPDATE db_config SET version = "9";
+    "#,
+];
+
 const CHAINSTATE_INDEXES: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS index_block_hash_to_primary_key ON block_headers(index_block_hash,consensus_hash,block_hash);",
     "CREATE INDEX IF NOT EXISTS block_headers_hash_index ON block_headers(block_hash,block_height);",
@@ -877,6 +876,7 @@ const CHAINSTATE_INDEXES: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS index_block_header_by_affirmation_weight ON block_headers(affirmation_weight);",
     "CREATE INDEX IF NOT EXISTS index_block_header_by_height_and_affirmation_weight ON block_headers(block_height,affirmation_weight);",
     "CREATE INDEX IF NOT EXISTS index_headers_by_consensus_hash ON block_headers(consensus_hash);",
+    "CREATE INDEX IF NOT EXISTS processable_block ON staging_blocks(processed, orphaned, attachable);",
 ];
 
 pub use stacks_common::consts::MINER_REWARD_MATURITY;
@@ -1104,6 +1104,22 @@ impl StacksChainState {
                         tx.execute_batch(cmd)?;
                     }
                 }
+                "8" => {
+                    info!(
+                        "Migrating chainstate schema from version 8 to 9: add index for staging_blocks"
+                    );
+                    for cmd in CHAINSTATE_SCHEMA_4.iter() {
+                        tx.execute_batch(cmd)?;
+                    }
+                }
+                "9" => {
+                    info!(
+                        "Migrating chainstate schema from version 9 to 10: add index for nakamoto_block_headers"
+                    );
+                    for cmd in NAKAMOTO_CHAINSTATE_SCHEMA_6.iter() {
+                        tx.execute_batch(cmd)?;
+                    }
+                }
                 _ => {
                     error!(
                         "Invalid chain state database: expected version = {}, got {}",
@@ -1252,9 +1268,9 @@ impl StacksChainState {
 
         let boot_code_address = boot_code_addr(mainnet);
 
-        let boot_code_auth = boot_code_tx_auth(boot_code_address);
+        let boot_code_auth = boot_code_tx_auth(boot_code_address.clone());
 
-        let mut boot_code_account = boot_code_acc(boot_code_address, 0);
+        let mut boot_code_account = boot_code_acc(boot_code_address.clone(), 0);
 
         let mut initial_liquid_ustx = 0u128;
         let mut receipts = vec![];
@@ -1500,7 +1516,7 @@ impl StacksChainState {
                                 assert_eq!(components.len(), 2);
 
                                 let namespace = {
-                                    let namespace_str = components[1];
+                                    let namespace_str = components.get(1).unwrap();
                                     if !BNS_CHARS_REGEX.is_match(namespace_str) {
                                         panic!("Invalid namespace characters");
                                     }
@@ -1509,7 +1525,7 @@ impl StacksChainState {
                                 };
 
                                 let name = {
-                                    let name_str = components[0].to_string();
+                                    let name_str = components.get(0).unwrap().to_string();
                                     if !BNS_CHARS_REGEX.is_match(&name_str) {
                                         panic!("Invalid name characters");
                                     }
@@ -1624,7 +1640,7 @@ impl StacksChainState {
                     &contract,
                     "set-burnchain-parameters",
                     &params,
-                    |_, _| false,
+                    |_, _| None,
                     None,
                 )
                 .expect("Failed to set burnchain parameters in PoX contract");
@@ -2712,7 +2728,6 @@ pub mod test {
     use stx_genesis::GenesisData;
 
     use super::*;
-    use crate::chainstate::stacks::db::*;
     use crate::chainstate::stacks::*;
     use crate::util_lib::boot::boot_code_test_addr;
 

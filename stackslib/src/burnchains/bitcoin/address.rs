@@ -15,14 +15,14 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use stacks_common::address::b58 as base58;
-use stacks_common::address::c32::c32_address;
 use stacks_common::deps_common::bech32;
 use stacks_common::deps_common::bech32::{u5, FromBase32, ToBase32};
 use stacks_common::deps_common::bitcoin::blockdata::opcodes::All as BtcOp;
 use stacks_common::deps_common::bitcoin::blockdata::script::Builder as BtcScriptBuilder;
 use stacks_common::deps_common::bitcoin::blockdata::transaction::TxOut;
-use stacks_common::util::hash::{hex_bytes, to_hex, Hash160};
-use stacks_common::util::log;
+#[cfg(test)]
+use stacks_common::util::hash::hex_bytes;
+use stacks_common::util::hash::Hash160;
 
 use crate::burnchains::bitcoin::{BitcoinNetworkType, Error as btc_error};
 use crate::burnchains::Address;
@@ -45,13 +45,13 @@ pub struct LegacyBitcoinAddress {
     pub bytes: Hash160,
 }
 
-/// Segwit address.  The bool member is "mainnet" (to determine the hrp)
+/// Segwit address. The [`BitcoinNetworkType`] member allows to to determine the HRP
 /// New in 2.1
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 pub enum SegwitBitcoinAddress {
-    P2WPKH(bool, [u8; 20]),
-    P2WSH(bool, [u8; 32]),
-    P2TR(bool, [u8; 32]),
+    P2WPKH(BitcoinNetworkType, [u8; 20]),
+    P2WSH(BitcoinNetworkType, [u8; 32]),
+    P2TR(BitcoinNetworkType, [u8; 32]),
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
@@ -81,6 +81,7 @@ pub const ADDRESS_VERSION_TESTNET_MULTISIG: u8 = 196;
 // segwit hrps
 pub const SEGWIT_MAINNET_HRP: &str = "bc";
 pub const SEGWIT_TESTNET_HRP: &str = "tb";
+pub const SEGWIT_REGTEST_HRP: &str = "bcrt";
 
 // segwit witnes versions
 pub const SEGWIT_V0: u8 = 0;
@@ -155,15 +156,6 @@ pub fn to_b58_version_byte(version: u8) -> Option<u8> {
     }
 }
 
-/// Get the HRP for a segwit address based on whether or not we're in mainnet
-pub fn segwit_hrp(mainnet: bool) -> &'static str {
-    if mainnet {
-        SEGWIT_MAINNET_HRP
-    } else {
-        SEGWIT_TESTNET_HRP
-    }
-}
-
 impl LegacyBitcoinAddress {
     fn to_versioned_bytes(&self) -> [u8; 21] {
         let mut ret = [0; 21];
@@ -172,9 +164,7 @@ impl LegacyBitcoinAddress {
         let version_byte = legacy_address_type_to_version_byte(addrtype, network_id);
 
         ret[0] = version_byte;
-        for i in 0..20 {
-            ret[i + 1] = self.bytes[i];
-        }
+        ret[1..21].copy_from_slice(&self.bytes.0[0..20]);
         return ret;
     }
 
@@ -219,24 +209,25 @@ impl LegacyBitcoinAddress {
             return Err(btc_error::InvalidByteSequence);
         }
 
-        let version = bytes[0];
-
-        let (addrtype, network_id) = match legacy_version_byte_to_address_type(version) {
-            Some(x) => x,
-            None => {
-                test_debug!("Invalid address: unrecognized version {}", version);
-                return Err(btc_error::InvalidByteSequence);
-            }
+        let Some(version) = bytes.get(0) else {
+            return Err(btc_error::InvalidByteSequence);
         };
 
-        let mut payload_bytes = [0; 20];
-        let b = &bytes[1..21];
-        payload_bytes.copy_from_slice(b);
+        let Some((addrtype, network_id)) = legacy_version_byte_to_address_type(*version) else {
+            test_debug!("Invalid address: unrecognized version {}", version);
+            return Err(btc_error::InvalidByteSequence);
+        };
+
+        let payload_bytes: &[u8; 20] = bytes
+            .get(1..21)
+            .ok_or_else(|| btc_error::InvalidByteSequence)?
+            .try_into()
+            .map_err(|_| btc_error::InvalidByteSequence)?;
 
         Ok(LegacyBitcoinAddress {
             network_id,
             addrtype,
-            bytes: Hash160(payload_bytes),
+            bytes: Hash160(payload_bytes.clone()),
         })
     }
 }
@@ -270,11 +261,26 @@ impl SegwitBitcoinAddress {
         version_bytes
     }
 
+    /// Returns `true` if this Segwit address belongs to the Mainnet network.
     pub fn is_mainnet(&self) -> bool {
+        self.network().is_mainnet()
+    }
+
+    /// Returns the Bitcoin network type associated with this Segwit address.
+    pub fn network(&self) -> BitcoinNetworkType {
         match *self {
-            SegwitBitcoinAddress::P2WPKH(ref mainnet, _) => *mainnet,
-            SegwitBitcoinAddress::P2WSH(ref mainnet, _) => *mainnet,
-            SegwitBitcoinAddress::P2TR(ref mainnet, _) => *mainnet,
+            SegwitBitcoinAddress::P2WPKH(ref network, _)
+            | SegwitBitcoinAddress::P2WSH(ref network, _)
+            | SegwitBitcoinAddress::P2TR(ref network, _) => *network,
+        }
+    }
+
+    /// Returns the HRP string associated with address network
+    pub fn hrp(&self) -> &'static str {
+        match self.network() {
+            BitcoinNetworkType::Mainnet => SEGWIT_MAINNET_HRP,
+            BitcoinNetworkType::Testnet => SEGWIT_TESTNET_HRP,
+            BitcoinNetworkType::Regtest => SEGWIT_REGTEST_HRP,
         }
     }
 
@@ -296,8 +302,7 @@ impl SegwitBitcoinAddress {
     }
 
     pub fn to_bech32(&self) -> String {
-        let hrp = segwit_hrp(self.is_mainnet());
-        self.to_bech32_hrp(hrp)
+        self.to_bech32_hrp(self.hrp())
     }
 
     pub fn from_bech32(s: &str) -> Option<SegwitBitcoinAddress> {
@@ -307,23 +312,24 @@ impl SegwitBitcoinAddress {
             })
             .ok()?;
 
-        let mainnet = if hrp == SEGWIT_MAINNET_HRP {
-            Some(true)
-        } else if hrp == SEGWIT_TESTNET_HRP {
-            Some(false)
-        } else {
-            test_debug!("Unrecognized hrp '{:?}'", &hrp);
-            None
-        }?;
+        let network_type = match hrp.as_str() {
+            SEGWIT_MAINNET_HRP => BitcoinNetworkType::Mainnet,
+            SEGWIT_TESTNET_HRP => BitcoinNetworkType::Testnet,
+            SEGWIT_REGTEST_HRP => BitcoinNetworkType::Regtest,
+            _ => {
+                test_debug!("Unrecognized hrp '{:?}'", &hrp);
+                return None;
+            }
+        };
 
         if quintets.is_empty() || quintets.len() > 65 {
             test_debug!("Invalid prog length: {}", quintets.len());
             return None;
         }
 
-        let version: u8 = quintets[0].into();
+        let version = u8::from(*quintets.get(0)?);
         let mut prog = Vec::with_capacity(quintets.len());
-        prog.append(&mut quintets[1..].to_vec());
+        prog.append(&mut quintets.get(1..)?.to_vec());
 
         let bytes = Vec::from_base32(&prog)
             .inspect_err(|_e| {
@@ -333,19 +339,16 @@ impl SegwitBitcoinAddress {
 
         match (variant, version, bytes.len()) {
             (bech32::Variant::Bech32, SEGWIT_V0, 20) => {
-                let mut bytes_20 = [0u8; 20];
-                bytes_20.copy_from_slice(&bytes[0..20]);
-                Some(SegwitBitcoinAddress::P2WPKH(mainnet, bytes_20))
+                let bytes_20 = bytes.try_into().ok()?;
+                Some(SegwitBitcoinAddress::P2WPKH(network_type, bytes_20))
             }
             (bech32::Variant::Bech32, SEGWIT_V0, 32) => {
-                let mut bytes_32 = [0u8; 32];
-                bytes_32.copy_from_slice(&bytes[0..32]);
-                Some(SegwitBitcoinAddress::P2WSH(mainnet, bytes_32))
+                let bytes_32 = bytes.try_into().ok()?;
+                Some(SegwitBitcoinAddress::P2WSH(network_type, bytes_32))
             }
             (bech32::Variant::Bech32m, SEGWIT_V1, 32) => {
-                let mut bytes_32 = [0u8; 32];
-                bytes_32.copy_from_slice(&bytes[0..32]);
-                Some(SegwitBitcoinAddress::P2TR(mainnet, bytes_32))
+                let bytes_32 = bytes.try_into().ok()?;
+                Some(SegwitBitcoinAddress::P2TR(network_type, bytes_32))
             }
             (_, _, _) => {
                 test_debug!(
@@ -417,14 +420,14 @@ impl BitcoinAddress {
             return Err(btc_error::InvalidByteSequence);
         }
 
-        let mut my_bytes = [0; 20];
-        let b = &bytes[..bytes.len()];
-        my_bytes.copy_from_slice(b);
+        let my_bytes: &[u8; 20] = bytes
+            .try_into()
+            .map_err(|_| btc_error::InvalidByteSequence)?;
 
         Ok(BitcoinAddress::Legacy(LegacyBitcoinAddress {
             network_id,
             addrtype,
-            bytes: Hash160(my_bytes),
+            bytes: Hash160(*my_bytes),
         }))
     }
 
@@ -437,13 +440,12 @@ impl BitcoinAddress {
             return Err(btc_error::InvalidByteSequence);
         }
 
-        let mut my_bytes = [0; 20];
-        let b = &bytes[..bytes.len()];
-        my_bytes.copy_from_slice(b);
+        let my_bytes: &[u8; 20] = bytes
+            .try_into()
+            .map_err(|_| btc_error::InvalidByteSequence)?;
 
-        let mainnet = network_id == BitcoinNetworkType::Mainnet;
         Ok(BitcoinAddress::Segwit(SegwitBitcoinAddress::P2WPKH(
-            mainnet, my_bytes,
+            network_id, *my_bytes,
         )))
     }
 
@@ -455,68 +457,58 @@ impl BitcoinAddress {
         scriptpubkey: &[u8],
     ) -> Option<BitcoinAddress> {
         if scriptpubkey.len() == 25
-            && scriptpubkey[0..3] == [0x76, 0xa9, 0x14]
-            && scriptpubkey[23..25] == [0x88, 0xac]
+            && scriptpubkey.get(0..3)? == &[0x76, 0xa9, 0x14]
+            && scriptpubkey.get(23..25)? == &[0x88, 0xac]
         {
             // p2pkh
-            let mut my_bytes = [0; 20];
-            let b = &scriptpubkey[3..23];
-            my_bytes.copy_from_slice(b);
+            let my_bytes: &[u8; 20] = scriptpubkey.get(3..23)?.try_into().ok()?;
 
             Some(BitcoinAddress::Legacy(LegacyBitcoinAddress {
                 network_id,
                 addrtype: LegacyBitcoinAddressType::PublicKeyHash,
-                bytes: Hash160(my_bytes),
+                bytes: Hash160(*my_bytes),
             }))
         } else if scriptpubkey.len() == 23
-            && scriptpubkey[0..2] == [0xa9, 0x14]
-            && scriptpubkey[22] == 0x87
+            && scriptpubkey.get(0..2)? == &[0xa9, 0x14]
+            && *scriptpubkey.get(22)? == 0x87
         {
             // p2sh (or maybe segwit-p2sh)
-            let mut my_bytes = [0; 20];
-            let b = &scriptpubkey[2..22];
-            my_bytes.copy_from_slice(b);
+            let my_bytes: &[u8; 20] = scriptpubkey.get(2..22)?.try_into().ok()?;
 
             Some(BitcoinAddress::Legacy(LegacyBitcoinAddress {
                 network_id,
                 addrtype: LegacyBitcoinAddressType::ScriptHash,
-                bytes: Hash160(my_bytes),
+                bytes: Hash160(*my_bytes),
             }))
         } else if scriptpubkey.len() == 22
-            && scriptpubkey[0..2] == [BtcOp::OP_PUSHBYTES_0 as u8, 0x14]
+            && scriptpubkey.get(0..2)? == &[BtcOp::OP_PUSHBYTES_0 as u8, 0x14]
         {
             // segwit p2wpkh
-            let mut witness_program = [0u8; 20];
-            witness_program.copy_from_slice(&scriptpubkey[2..22]);
+            let witness_program: &[u8; 20] = scriptpubkey.get(2..22)?.try_into().ok()?;
 
-            let mainnet = network_id == BitcoinNetworkType::Mainnet;
             Some(BitcoinAddress::Segwit(SegwitBitcoinAddress::P2WPKH(
-                mainnet,
-                witness_program,
+                network_id,
+                *witness_program,
             )))
         } else if scriptpubkey.len() == 34
-            && scriptpubkey[0..2] == [BtcOp::OP_PUSHBYTES_0 as u8, 0x20]
+            && scriptpubkey.get(0..2)? == &[BtcOp::OP_PUSHBYTES_0 as u8, 0x20]
         {
             // segwit p2wsh
-            let mut witness_program = [0u8; 32];
-            witness_program.copy_from_slice(&scriptpubkey[2..34]);
+            let witness_program: &[u8; 32] = scriptpubkey.get(2..34)?.try_into().ok()?;
 
-            let mainnet = network_id == BitcoinNetworkType::Mainnet;
             Some(BitcoinAddress::Segwit(SegwitBitcoinAddress::P2WSH(
-                mainnet,
-                witness_program,
+                network_id,
+                *witness_program,
             )))
         } else if scriptpubkey.len() == 34
-            && scriptpubkey[0..2] == [BtcOp::OP_PUSHNUM_1 as u8, 0x20]
+            && scriptpubkey.get(0..2)? == &[BtcOp::OP_PUSHNUM_1 as u8, 0x20]
         {
             // segwit p2tr
-            let mut witness_program = [0u8; 32];
-            witness_program.copy_from_slice(&scriptpubkey[2..34]);
+            let witness_program: &[u8; 32] = scriptpubkey.get(2..34)?.try_into().ok()?;
 
-            let mainnet = network_id == BitcoinNetworkType::Mainnet;
             Some(BitcoinAddress::Segwit(SegwitBitcoinAddress::P2TR(
-                mainnet,
-                witness_program,
+                network_id,
+                *witness_program,
             )))
         } else {
             None
@@ -544,7 +536,7 @@ impl BitcoinAddress {
         return false;
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testing"))]
     pub fn expect_legacy(self) -> LegacyBitcoinAddress {
         match self {
             BitcoinAddress::Legacy(addr) => addr,
@@ -554,7 +546,7 @@ impl BitcoinAddress {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testing"))]
     pub fn expect_segwit(self) -> SegwitBitcoinAddress {
         match self {
             BitcoinAddress::Segwit(addr) => addr,
@@ -684,27 +676,58 @@ impl Address for BitcoinAddress {
 
 #[cfg(test)]
 mod tests {
+    use stacks_common::deps_common::bech32::Variant;
     use stacks_common::types::Address;
     use stacks_common::util::hash::{hex_bytes, Hash160};
-    use stacks_common::util::log;
 
-    use super::{
-        BitcoinAddress, LegacyBitcoinAddress, LegacyBitcoinAddressType, SegwitBitcoinAddress,
-    };
+    use super::*;
     use crate::burnchains::bitcoin::BitcoinNetworkType;
 
-    struct AddressFixture {
-        addr: String,
-        result: Option<BitcoinAddress>,
-    }
+    pub mod utils {
+        use super::*;
 
-    struct ScriptFixture {
-        scriptpubkey: Vec<u8>,
-        result: Option<BitcoinAddress>,
+        // Mainnet addresses
+        pub const MAINNET_ADDR_LEGACY_P2PKH: &str = "1DwGAhJLhTi53QN6v6dVafgHJBXKXJQ6Uw";
+        pub const MAINNET_ADDR_LEGACY_P2SH: &str = "3EdH6EnnFN2T8a4Y3CJ61J3DShp36uuHxd";
+        pub const MAINNET_ADDR_BECH32_P2WPKH: &str = "bc1q3hj2rk4fxj6wewmj63tzx4qadhxd39e449ft4k";
+        pub const MAINNET_ADDR_BECH32_P2WSH: &str =
+            "bc1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3qccfmv3";
+        pub const MAINNET_ADDR_BECH32M_P2TR: &str =
+            "bc1p8vg588hldsnv4a558apet4e9ff3pr4awhqj2hy8gy6x2yxzjpmqsvvpta4";
+
+        // Testnet addresses
+        pub const TESTNET_ADDR_LEGACY_P2PKH: &str = "mr6QvHWqM7x6aR2ZubM5nwzLyqK2v8AmEr";
+        pub const TESTNET_ADDR_LEGACY_P2SH: &str = "2N3pgcWrKhTLa6FsvzFfB1c8DUiDDNefjMH";
+        pub const TESTNET_ADDR_BECH32_P2WPKH: &str = "tb1qkgm3dcvrhgy5n32adjkzrglfg9mwa5gjmwt5ex";
+        pub const TESTNET_ADDR_BECH32_P2WSH: &str =
+            "tb1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3q0sl5k7";
+        pub const TESTNET_ADDR_BECH32M_P2TR: &str =
+            "tb1p4tp4l6glyr2gs94neqcpr5gha7344nfyznfkc8szkreflscsdkgqsdent4";
+
+        // Regtest addresses (legacy addresses have same format as testent, but added for completness)
+        pub const REGTEST_ADDR_LEGACY_P2PKH: &str = "mrEXpzVbpgFzZ8cYBWzpWeMjFAnv7tJnzY";
+        pub const REGTEST_ADDR_LEGACY_P2SH: &str = "2NGMuPBTF6uWQyTaevzdus5i6E1AdECXPhC";
+        pub const REGTEST_ADDR_BECH32_P2WPKH: &str = "bcrt1qtsszg5k8dscmegzz048xpsceu2fjmtarkp6wjm";
+        pub const REGTEST_ADDR_BECH32_P2WSH: &str =
+            "bcrt1q90a20y4ypm589jv6j66p9y4p979p0dh33mw50a3vefpmywpzu8wq42yz6v";
+        pub const REGTEST_ADDR_BECH32M_P2TR: &str =
+            "bcrt1p4nsxnhzqhx3yvjp8zy74ggljdy8zllsnf37jf70mlqelvc3ad4aq3ug5ay";
+
+        pub struct AddressFixture {
+            pub addr: String,
+            pub result: Option<BitcoinAddress>,
+        }
+
+        pub struct ScriptFixture {
+            pub scriptpubkey: Vec<u8>,
+            pub result: Option<BitcoinAddress>,
+        }
     }
 
     #[test]
     fn test_from_b58() {
+        use utils::AddressFixture;
+
         let fixtures = vec![
             AddressFixture {
                 addr: "mr6nrMvvh44sR5MiX929mMXP5hqgaTr6fx".to_owned(),
@@ -778,12 +801,14 @@ mod tests {
 
     #[test]
     fn test_from_bech32() {
+        use utils::AddressFixture;
+
         let fixtures = vec![
             // taken from bip-0173
             AddressFixture {
                 addr: "BC1QW508D6QEJXTDG4Y5R3ZARVARY0C5XW7KV8F3T4".to_owned(),
                 result: Some(BitcoinAddress::Segwit(SegwitBitcoinAddress::P2WPKH(
-                    true,
+                    BitcoinNetworkType::Mainnet,
                     [
                         0x75, 0x1e, 0x76, 0xe8, 0x19, 0x91, 0x96, 0xd4, 0x54, 0x94, 0x1c, 0x45,
                         0xd1, 0xb3, 0xa3, 0x23, 0xf1, 0x43, 0x3b, 0xd6,
@@ -793,7 +818,7 @@ mod tests {
             AddressFixture {
                 addr: "tb1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3q0sl5k7".to_owned(),
                 result: Some(BitcoinAddress::Segwit(SegwitBitcoinAddress::P2WSH(
-                    false,
+                    BitcoinNetworkType::Testnet,
                     [
                         0x18, 0x63, 0x14, 0x3c, 0x14, 0xc5, 0x16, 0x68, 0x04, 0xbd, 0x19, 0x20,
                         0x33, 0x56, 0xda, 0x13, 0x6c, 0x98, 0x56, 0x78, 0xcd, 0x4d, 0x27, 0xa1,
@@ -820,7 +845,7 @@ mod tests {
             AddressFixture {
                 addr: "tb1qqqqqp399et2xygdj5xreqhjjvcmzhxw4aywxecjdzew6hylgvsesrxh6hy".to_owned(),
                 result: Some(BitcoinAddress::Segwit(SegwitBitcoinAddress::P2WSH(
-                    false,
+                    BitcoinNetworkType::Testnet,
                     [
                         0x00, 0x00, 0x00, 0xc4, 0xa5, 0xca, 0xd4, 0x62, 0x21, 0xb2, 0xa1, 0x87,
                         0x90, 0x5e, 0x52, 0x66, 0x36, 0x2b, 0x99, 0xd5, 0xe9, 0x1c, 0x6c, 0xe2,
@@ -906,6 +931,8 @@ mod tests {
 
     #[test]
     fn test_from_scriptpubkey() {
+        use utils::ScriptFixture;
+
         let fixtures = vec![
             ScriptFixture {
                 scriptpubkey: hex_bytes("76a9146ea17fc39169cdd9f2414a893aa5ce0c4b4c893488ac")
@@ -954,7 +981,7 @@ mod tests {
                     .unwrap()
                     .to_vec(),
                 result: Some(BitcoinAddress::Segwit(SegwitBitcoinAddress::P2WPKH(
-                    true,
+                    BitcoinNetworkType::Mainnet,
                     [
                         0x75, 0x1e, 0x76, 0xe8, 0x19, 0x91, 0x96, 0xd4, 0x54, 0x94, 0x1c, 0x45,
                         0xd1, 0xb3, 0xa3, 0x23, 0xf1, 0x43, 0x3b, 0xd6,
@@ -969,7 +996,7 @@ mod tests {
                 .unwrap()
                 .to_vec(),
                 result: Some(BitcoinAddress::Segwit(SegwitBitcoinAddress::P2WSH(
-                    true,
+                    BitcoinNetworkType::Mainnet,
                     [
                         0x18, 0x63, 0x14, 0x3c, 0x14, 0xc5, 0x16, 0x68, 0x04, 0xbd, 0x19, 0x20,
                         0x33, 0x56, 0xda, 0x13, 0x6c, 0x98, 0x56, 0x78, 0xcd, 0x4d, 0x27, 0xa1,
@@ -985,7 +1012,7 @@ mod tests {
                 .unwrap()
                 .to_vec(),
                 result: Some(BitcoinAddress::Segwit(SegwitBitcoinAddress::P2WSH(
-                    true,
+                    BitcoinNetworkType::Mainnet,
                     [
                         0x00, 0x00, 0x00, 0xc4, 0xa5, 0xca, 0xd4, 0x62, 0x21, 0xb2, 0xa1, 0x87,
                         0x90, 0x5e, 0x52, 0x66, 0x36, 0x2b, 0x99, 0xd5, 0xe9, 0x1c, 0x6c, 0xe2,
@@ -1002,7 +1029,7 @@ mod tests {
                 .unwrap()
                 .to_vec(),
                 result: Some(BitcoinAddress::Segwit(SegwitBitcoinAddress::P2TR(
-                    true,
+                    BitcoinNetworkType::Mainnet,
                     [
                         0x33, 0x9c, 0xe7, 0xe1, 0x65, 0xe6, 0x7d, 0x93, 0xad, 0xb3, 0xfe, 0xf8,
                         0x8a, 0x6d, 0x4b, 0xee, 0xd3, 0x3f, 0x01, 0xfa, 0x87, 0x6f, 0x05, 0xa2,
@@ -1083,5 +1110,170 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_from_bech32_p2wpkh_string_regtest() {
+        let addr_str = utils::REGTEST_ADDR_BECH32_P2WPKH;
+
+        let addr = SegwitBitcoinAddress::from_bech32(addr_str).unwrap();
+        assert_eq!(addr_str, addr.to_bech32(), "to bench32 check");
+        assert_eq!(addr_str, addr.to_string(), "to string check");
+        assert_eq!(Variant::Bech32, addr.bech32_variant(), "variant check");
+        assert_eq!(true, addr.is_p2wpkh(), "type check");
+        assert_eq!(false, addr.is_mainnet(), "mainnet check");
+        assert_eq!(SEGWIT_REGTEST_HRP, addr.hrp(), "hrp check");
+        assert_eq!(BitcoinNetworkType::Regtest, addr.network(), "network check");
+    }
+
+    #[test]
+    fn test_from_bech32_p2swh_string_regtest() {
+        let addr_str = utils::REGTEST_ADDR_BECH32_P2WSH;
+
+        let addr = SegwitBitcoinAddress::from_bech32(addr_str).unwrap();
+        assert_eq!(addr_str, addr.to_bech32(), "to bench32 check");
+        assert_eq!(addr_str, addr.to_string(), "to string check");
+        assert_eq!(Variant::Bech32, addr.bech32_variant(), "variant check");
+        assert_eq!(true, addr.is_p2wsh(), "type check");
+        assert_eq!(false, addr.is_mainnet(), "mainnet check");
+        assert_eq!(SEGWIT_REGTEST_HRP, addr.hrp(), "hrp check");
+        assert_eq!(BitcoinNetworkType::Regtest, addr.network(), "network check");
+    }
+
+    #[test]
+    fn test_from_bech32m_p2tr_string_regtest() {
+        let addr_str = utils::REGTEST_ADDR_BECH32M_P2TR;
+
+        let addr = SegwitBitcoinAddress::from_bech32(addr_str).unwrap();
+        assert_eq!(addr_str, addr.to_bech32(), "to bench32 check");
+        assert_eq!(addr_str, addr.to_string(), "to string check");
+        assert_eq!(Variant::Bech32m, addr.bech32_variant(), "variant check");
+        assert_eq!(false, addr.is_mainnet(), "mainnet check");
+        assert_eq!(true, addr.is_p2tr(), "type check");
+        assert_eq!(SEGWIT_REGTEST_HRP, addr.hrp(), "hrp check");
+        assert_eq!(BitcoinNetworkType::Regtest, addr.network(), "network check");
+    }
+
+    #[test]
+    fn test_from_string_mainnet() {
+        let legacy_p2pkh = utils::MAINNET_ADDR_LEGACY_P2PKH;
+        let legacy_p2sh = utils::MAINNET_ADDR_LEGACY_P2SH;
+        let bech32_p2wpkh = utils::MAINNET_ADDR_BECH32_P2WPKH;
+        let bech32_p2wsh = utils::MAINNET_ADDR_BECH32_P2WSH;
+        let bech32m_p2tr = utils::MAINNET_ADDR_BECH32M_P2TR;
+
+        assert_eq!(
+            legacy_p2pkh,
+            BitcoinAddress::from_string(legacy_p2pkh)
+                .unwrap()
+                .to_string()
+        );
+        assert_eq!(
+            legacy_p2sh,
+            BitcoinAddress::from_string(legacy_p2sh)
+                .unwrap()
+                .to_string()
+        );
+        assert_eq!(
+            bech32_p2wpkh,
+            BitcoinAddress::from_string(bech32_p2wpkh)
+                .unwrap()
+                .to_string()
+        );
+        assert_eq!(
+            bech32_p2wsh,
+            BitcoinAddress::from_string(bech32_p2wsh)
+                .unwrap()
+                .to_string()
+        );
+        assert_eq!(
+            bech32m_p2tr,
+            BitcoinAddress::from_string(bech32m_p2tr)
+                .unwrap()
+                .to_string()
+        );
+    }
+
+    #[test]
+    fn test_from_string_testnet() {
+        let legacy_p2pkh = utils::TESTNET_ADDR_LEGACY_P2PKH;
+        let legacy_p2sh = utils::TESTNET_ADDR_LEGACY_P2SH;
+        let bech32_p2wpkh = utils::TESTNET_ADDR_BECH32_P2WPKH;
+        let bech32_p2wsh = utils::TESTNET_ADDR_BECH32_P2WSH;
+        let bech32m_p2tr = utils::TESTNET_ADDR_BECH32M_P2TR;
+
+        assert_eq!(
+            legacy_p2pkh,
+            BitcoinAddress::from_string(legacy_p2pkh)
+                .unwrap()
+                .to_string()
+        );
+        assert_eq!(
+            legacy_p2sh,
+            BitcoinAddress::from_string(legacy_p2sh)
+                .unwrap()
+                .to_string()
+        );
+        assert_eq!(
+            bech32_p2wpkh,
+            BitcoinAddress::from_string(bech32_p2wpkh)
+                .unwrap()
+                .to_string()
+        );
+        assert_eq!(
+            bech32_p2wsh,
+            BitcoinAddress::from_string(bech32_p2wsh)
+                .unwrap()
+                .to_string()
+        );
+        assert_eq!(
+            bech32m_p2tr,
+            BitcoinAddress::from_string(bech32m_p2tr)
+                .unwrap()
+                .to_string()
+        );
+    }
+
+    #[test]
+    fn test_from_string_regtest() {
+        // Legacy addresses have same format as testnet.
+        // However these are created from bitcoind in regtest mode,
+        // so including them for completeness
+        let legacy_p2pkh = utils::REGTEST_ADDR_LEGACY_P2PKH;
+        let legacy_p2sh = utils::REGTEST_ADDR_LEGACY_P2SH;
+        let bech32_p2wpkh = utils::REGTEST_ADDR_BECH32_P2WPKH;
+        let bech32_p2wsh = utils::REGTEST_ADDR_BECH32_P2WSH;
+        let bech32m_p2tr = utils::REGTEST_ADDR_BECH32M_P2TR;
+
+        assert_eq!(
+            legacy_p2pkh,
+            BitcoinAddress::from_string(legacy_p2pkh)
+                .unwrap()
+                .to_string()
+        );
+        assert_eq!(
+            legacy_p2sh,
+            BitcoinAddress::from_string(legacy_p2sh)
+                .unwrap()
+                .to_string()
+        );
+        assert_eq!(
+            bech32_p2wpkh,
+            BitcoinAddress::from_string(bech32_p2wpkh)
+                .unwrap()
+                .to_string()
+        );
+        assert_eq!(
+            bech32_p2wsh,
+            BitcoinAddress::from_string(bech32_p2wsh)
+                .unwrap()
+                .to_string()
+        );
+        assert_eq!(
+            bech32m_p2tr,
+            BitcoinAddress::from_string(bech32m_p2tr)
+                .unwrap()
+                .to_string()
+        );
     }
 }

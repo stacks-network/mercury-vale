@@ -19,18 +19,11 @@ use std::path::Path;
 
 use clarity::vm::types::QualifiedContractIdentifier;
 use clarity::vm::ContractName;
-use libstackerdb::SlotMetadata;
-use rusqlite::params;
-use stacks_common::address::{
-    AddressHashMode, C32_ADDRESS_VERSION_MAINNET_MULTISIG, C32_ADDRESS_VERSION_MAINNET_SINGLESIG,
-};
-use stacks_common::types::chainstate::{
-    ConsensusHash, StacksAddress, StacksPrivateKey, StacksPublicKey,
-};
+use stacks_common::address::{AddressHashMode, C32_ADDRESS_VERSION_MAINNET_SINGLESIG};
+use stacks_common::types::chainstate::{StacksAddress, StacksPrivateKey, StacksPublicKey};
 use stacks_common::util::hash::{Hash160, Sha512Trunc256Sum};
 use stacks_common::util::secp256k1::MessageSignature;
 
-use crate::net::stackerdb::db::SlotValidation;
 use crate::net::stackerdb::{StackerDBConfig, StackerDBs};
 use crate::net::{Error as net_error, StackerDBChunkData};
 
@@ -570,12 +563,24 @@ fn test_reconfigure_stackerdb() {
     let new_pks: Vec<_> = (0..10).map(|_| StacksPrivateKey::random()).collect();
     let reconfigured_pks = vec![
         // first five slots are unchanged
-        pks[0], pks[1], pks[2], pks[3], pks[4],
+        pks[0].clone(),
+        pks[1].clone(),
+        pks[2].clone(),
+        pks[3].clone(),
+        pks[4].clone(),
         // next five slots are different, so their contents will be dropped and versions and write
         // timestamps reset
-        new_pks[0], new_pks[1], new_pks[2], new_pks[3], new_pks[4],
+        new_pks[0].clone(),
+        new_pks[1].clone(),
+        new_pks[2].clone(),
+        new_pks[3].clone(),
+        new_pks[4].clone(),
         // next five slots are now, so they'll be uninitialized
-        new_pks[5], new_pks[6], new_pks[7], new_pks[8], new_pks[9],
+        new_pks[5].clone(),
+        new_pks[6].clone(),
+        new_pks[7].clone(),
+        new_pks[8].clone(),
+        new_pks[9].clone(),
     ];
     let reconfigured_addrs: Vec<_> = reconfigured_pks
         .iter()
@@ -651,11 +656,18 @@ fn test_reconfigure_stackerdb() {
     let new_pks: Vec<_> = (0..10).map(|_| StacksPrivateKey::random()).collect();
     let reconfigured_pks = vec![
         // first five slots are unchanged
-        pks[0], pks[1], pks[2], pks[3], pks[4],
+        pks[0].clone(),
+        pks[1].clone(),
+        pks[2].clone(),
+        pks[3].clone(),
+        pks[4].clone(),
         // next five slots are different, so their contents will be dropped and versions and write
         // timestamps reset
-        new_pks[0], new_pks[1], new_pks[2], new_pks[3],
-        new_pks[4],
+        new_pks[0].clone(),
+        new_pks[1].clone(),
+        new_pks[2].clone(),
+        new_pks[3].clone(),
+        new_pks[4].clone(),
         // slots 10-15 will disappear
     ];
     let reconfigured_addrs: Vec<_> = reconfigured_pks

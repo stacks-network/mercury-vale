@@ -26,7 +26,7 @@ use lazy_static::lazy_static;
 use stacks_common::types::StacksEpochId;
 
 use crate::vm::costs::{runtime_cost, CostOverflowingMath};
-use crate::vm::errors::CheckErrors;
+use crate::vm::errors::{CheckErrors, SyntaxBindingError, SyntaxBindingErrorType};
 use crate::vm::representations::{
     ClarityName, ContractName, SymbolicExpression, SymbolicExpressionType, TraitDefinition,
     CONTRACT_MAX_NAME_LENGTH,
@@ -585,7 +585,8 @@ impl TypeSignature {
             | StacksEpochId::Epoch24
             | StacksEpochId::Epoch25
             | StacksEpochId::Epoch30
-            | StacksEpochId::Epoch31 => self.admits_type_v2_1(other),
+            | StacksEpochId::Epoch31
+            | StacksEpochId::Epoch32 => self.admits_type_v2_1(other),
             StacksEpochId::Epoch10 => Err(CheckErrors::Expects("epoch 1.0 not supported".into())),
         }
     }
@@ -793,7 +794,8 @@ impl TypeSignature {
             | StacksEpochId::Epoch24
             | StacksEpochId::Epoch25
             | StacksEpochId::Epoch30
-            | StacksEpochId::Epoch31 => self.canonicalize_v2_1(),
+            | StacksEpochId::Epoch31
+            | StacksEpochId::Epoch32 => self.canonicalize_v2_1(),
         }
     }
 
@@ -946,19 +948,6 @@ impl TupleTypeSignature {
         }
 
         Ok(true)
-    }
-
-    pub fn parse_name_type_pair_list<A: CostTracker>(
-        epoch: StacksEpochId,
-        type_def: &SymbolicExpression,
-        accounting: &mut A,
-    ) -> Result<TupleTypeSignature> {
-        if let SymbolicExpressionType::List(ref name_type_pairs) = type_def.expr {
-            let mapped_key_types = parse_name_type_pairs(epoch, name_type_pairs, accounting)?;
-            TupleTypeSignature::try_from(mapped_key_types)
-        } else {
-            Err(CheckErrors::BadSyntaxExpectedListOfPairs)
-        }
     }
 
     pub fn shallow_merge(&mut self, update: &mut TupleTypeSignature) {
@@ -1152,7 +1141,8 @@ impl TypeSignature {
             | StacksEpochId::Epoch24
             | StacksEpochId::Epoch25
             | StacksEpochId::Epoch30
-            | StacksEpochId::Epoch31 => Self::least_supertype_v2_1(a, b),
+            | StacksEpochId::Epoch31
+            | StacksEpochId::Epoch32 => Self::least_supertype_v2_1(a, b),
             StacksEpochId::Epoch10 => Err(CheckErrors::Expects("epoch 1.0 not supported".into())),
         }
     }
@@ -1504,7 +1494,12 @@ impl TypeSignature {
         type_args: &[SymbolicExpression],
         accounting: &mut A,
     ) -> Result<TypeSignature> {
-        let mapped_key_types = parse_name_type_pairs(epoch, type_args, accounting)?;
+        let mapped_key_types = parse_name_type_pairs::<_, CheckErrors>(
+            epoch,
+            type_args,
+            SyntaxBindingErrorType::TupleCons,
+            accounting,
+        )?;
         let tuple_type_signature = TupleTypeSignature::try_from(mapped_key_types)?;
         Ok(TypeSignature::from(tuple_type_signature))
     }
@@ -1921,11 +1916,18 @@ use crate::vm::costs::cost_functions::ClarityCostFunction;
 use crate::vm::costs::CostTracker;
 use crate::vm::ClarityVersion;
 
-pub fn parse_name_type_pairs<A: CostTracker>(
+/// Try to parse a list of (name_i, type_i) pairs into Vec<(ClarityName, TypeSignature)>.
+/// On failure, return both the type-check error as well as the index of the symbolic expression which caused
+/// the problem (for purposes of reporting the error).
+pub fn parse_name_type_pairs<A: CostTracker, E>(
     epoch: StacksEpochId,
     name_type_pairs: &[SymbolicExpression],
+    binding_error_type: SyntaxBindingErrorType,
     accounting: &mut A,
-) -> Result<Vec<(ClarityName, TypeSignature)>> {
+) -> std::result::Result<Vec<(ClarityName, TypeSignature)>, E>
+where
+    E: for<'a> From<(CheckErrors, &'a SymbolicExpression)>,
+{
     // this is a pretty deep nesting here, but what we're trying to do is pick out the values of
     // the form:
     // ((name1 type1) (name2 type2) (name3 type3) ...)
@@ -1933,35 +1935,55 @@ pub fn parse_name_type_pairs<A: CostTracker>(
     use crate::vm::representations::SymbolicExpressionType::List;
 
     // step 1: parse it into a vec of symbolicexpression pairs.
-    let as_pairs: Result<Vec<_>> = name_type_pairs
+    let as_pairs: std::result::Result<Vec<_>, (CheckErrors, &SymbolicExpression)> = name_type_pairs
         .iter()
-        .map(|key_type_pair| {
+        .enumerate()
+        .map(|(i, key_type_pair)| {
             if let List(ref as_vec) = key_type_pair.expr {
                 if as_vec.len() != 2 {
-                    Err(CheckErrors::BadSyntaxExpectedListOfPairs)
+                    Err((
+                        CheckErrors::BadSyntaxBinding(SyntaxBindingError::InvalidLength(
+                            binding_error_type,
+                            i,
+                        )),
+                        key_type_pair,
+                    ))
                 } else {
                     Ok((&as_vec[0], &as_vec[1]))
                 }
             } else {
-                Err(CheckErrors::BadSyntaxExpectedListOfPairs)
+                Err((
+                    SyntaxBindingError::NotList(binding_error_type, i).into(),
+                    key_type_pair,
+                ))
             }
         })
         .collect();
 
     // step 2: turn into a vec of (name, typesignature) pairs.
-    let key_types: Result<Vec<_>> = (as_pairs?)
+    let key_types: std::result::Result<Vec<_>, (CheckErrors, &SymbolicExpression)> = (as_pairs?)
         .iter()
-        .map(|(name_symbol, type_symbol)| {
+        .enumerate()
+        .map(|(i, (name_symbol, type_symbol))| {
             let name = name_symbol
                 .match_atom()
-                .ok_or(CheckErrors::BadSyntaxExpectedListOfPairs)?
+                .ok_or_else(|| {
+                    (
+                        CheckErrors::BadSyntaxBinding(SyntaxBindingError::NotAtom(
+                            binding_error_type,
+                            i,
+                        )),
+                        *name_symbol,
+                    )
+                })?
                 .clone();
-            let type_info = TypeSignature::parse_type_repr(epoch, type_symbol, accounting)?;
+            let type_info = TypeSignature::parse_type_repr(epoch, type_symbol, accounting)
+                .map_err(|e| (e, *type_symbol))?;
             Ok((name, type_info))
         })
         .collect();
 
-    key_types
+    Ok(key_types?)
 }
 
 impl fmt::Display for TupleTypeSignature {
@@ -1970,7 +1992,7 @@ impl fmt::Display for TupleTypeSignature {
         let mut type_strs: Vec<_> = self.type_map.iter().collect();
         type_strs.sort_unstable_by_key(|x| x.0);
         for (field_name, field_type) in type_strs {
-            write!(f, " ({} {})", &**field_name, field_type)?;
+            write!(f, " ({} {field_type})", &**field_name)?;
         }
         write!(f, ")")
     }
@@ -1980,7 +2002,7 @@ impl fmt::Debug for TupleTypeSignature {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "TupleTypeSignature {{")?;
         for (field_name, field_type) in self.type_map.iter() {
-            write!(f, " \"{}\": {},", &**field_name, field_type)?;
+            write!(f, " \"{}\": {field_type},", &**field_name)?;
         }
         write!(f, "}}")
     }
@@ -2004,27 +2026,27 @@ impl fmt::Display for TypeSignature {
             IntType => write!(f, "int"),
             UIntType => write!(f, "uint"),
             BoolType => write!(f, "bool"),
-            OptionalType(t) => write!(f, "(optional {})", t),
+            OptionalType(t) => write!(f, "(optional {t})"),
             ResponseType(v) => write!(f, "(response {} {})", v.0, v.1),
-            TupleType(t) => write!(f, "{}", t),
+            TupleType(t) => write!(f, "{t}"),
             PrincipalType => write!(f, "principal"),
-            SequenceType(SequenceSubtype::BufferType(len)) => write!(f, "(buff {})", len),
+            SequenceType(SequenceSubtype::BufferType(len)) => write!(f, "(buff {len})"),
             SequenceType(SequenceSubtype::ListType(list_type_data)) => write!(
                 f,
                 "(list {} {})",
                 list_type_data.max_len, list_type_data.entry_type
             ),
             SequenceType(SequenceSubtype::StringType(StringSubtype::ASCII(len))) => {
-                write!(f, "(string-ascii {})", len)
+                write!(f, "(string-ascii {len})")
             }
             SequenceType(SequenceSubtype::StringType(StringSubtype::UTF8(len))) => {
-                write!(f, "(string-utf8 {})", len)
+                write!(f, "(string-utf8 {len})")
             }
             CallableType(CallableSubtype::Trait(trait_id)) | TraitReferenceType(trait_id) => {
-                write!(f, "<{}>", trait_id)
+                write!(f, "<{trait_id}>")
             }
             CallableType(CallableSubtype::Principal(contract_id)) => {
-                write!(f, "(principal {})", contract_id)
+                write!(f, "(principal {contract_id})")
             }
             ListUnionType(_) => write!(f, "principal"),
         }
@@ -2092,7 +2114,7 @@ mod test {
         let len = 4033;
         let mut keys = Vec::with_capacity(len);
         for i in 0..len {
-            let key_name = ClarityName::try_from(format!("a{:0127}", i)).unwrap();
+            let key_name = ClarityName::try_from(format!("a{i:0127}")).unwrap();
             let key_val = first_tuple.clone();
             keys.push((key_name, key_val));
         }

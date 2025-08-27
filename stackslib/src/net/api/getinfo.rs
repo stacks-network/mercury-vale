@@ -14,8 +14,6 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use std::io::{Read, Write};
-
 use regex::{Captures, Regex};
 use stacks_common::types::chainstate::{
     BlockHeaderHash, ConsensusHash, StacksBlockId, StacksPublicKey,
@@ -26,16 +24,13 @@ use stacks_common::util::hash::{Hash160, Sha256Sum};
 
 use crate::burnchains::affirmation::AffirmationMap;
 use crate::burnchains::Txid;
-use crate::chainstate::burn::db::sortdb::SortitionDB;
-use crate::chainstate::nakamoto::NakamotoChainState;
 use crate::chainstate::stacks::db::StacksChainState;
-use crate::core::mempool::MemPoolDB;
 use crate::net::http::{
     parse_json, Error, HttpRequest, HttpRequestContents, HttpRequestPreamble, HttpResponse,
-    HttpResponseContents, HttpResponsePayload, HttpResponsePreamble, HttpServerError,
+    HttpResponseContents, HttpResponsePayload, HttpResponsePreamble,
 };
 use crate::net::httpcore::{
-    HttpPreambleExtensions, RPCRequestHandler, StacksHttpRequest, StacksHttpResponse,
+    HttpPreambleExtensions as _, RPCRequestHandler, StacksHttpRequest, StacksHttpResponse,
 };
 use crate::net::p2p::PeerNetwork;
 use crate::net::{Error as NetError, StacksNodeState};
@@ -238,8 +233,7 @@ impl RPCRequestHandler for RPCPeerInfoRequestHandler {
             }
         };
 
-        let mut preamble = HttpResponsePreamble::ok_json(&preamble);
-        preamble.set_canonical_stacks_tip_height(Some(node.canonical_stacks_tip_height()));
+        let preamble = HttpResponsePreamble::ok_json(&preamble);
         let body = HttpResponseContents::try_from_json(&rpc_peer_info)?;
         Ok((preamble, body))
     }
@@ -259,7 +253,7 @@ impl HttpResponse for RPCPeerInfoRequestHandler {
 
 impl StacksHttpRequest {
     /// Make a new getinfo request to this endpoint
-    pub fn new_getinfo(host: PeerHost, stacks_height: Option<u32>) -> StacksHttpRequest {
+    pub fn new_getinfo(host: PeerHost, stacks_height: Option<u64>) -> StacksHttpRequest {
         let mut req = StacksHttpRequest::new_for_peer(
             host,
             "GET".into(),

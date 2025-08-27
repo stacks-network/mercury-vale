@@ -14,64 +14,34 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 
 use clarity::vm::clarity::ClarityConnection;
-use clarity::vm::contexts::OwnedEnvironment;
-use clarity::vm::contracts::Contract;
-use clarity::vm::costs::{CostOverflowingMath, LimitedCostTracker};
-use clarity::vm::database::*;
-use clarity::vm::errors::{
-    CheckErrors, Error, IncomparableError, InterpreterError, InterpreterResult, RuntimeErrorType,
-};
-use clarity::vm::eval;
-use clarity::vm::events::StacksTransactionEvent;
-use clarity::vm::representations::SymbolicExpression;
-use clarity::vm::tests::{execute, is_committed, is_err_code, symbols_from_values};
-use clarity::vm::types::Value::Response;
+use clarity::vm::costs::LimitedCostTracker;
 use clarity::vm::types::{
-    BuffData, OptionalData, PrincipalData, QualifiedContractIdentifier, ResponseData, SequenceData,
-    StacksAddressExtensions, StandardPrincipalData, TupleData, TupleTypeSignature, TypeSignature,
-    Value, NONE,
+    BuffData, PrincipalData, SequenceData, StacksAddressExtensions, StandardPrincipalData,
+    TupleData, Value,
 };
 use stacks_common::address::AddressHashMode;
-use stacks_common::types::chainstate::{
-    BlockHeaderHash, BurnchainHeaderHash, StacksAddress, StacksBlockId, VRFSeed,
-};
+use stacks_common::types::chainstate::{BurnchainHeaderHash, StacksAddress};
 use stacks_common::types::Address;
-use stacks_common::util::hash::{hex_bytes, to_hex, Sha256Sum, Sha512Trunc256Sum};
 
 use super::test::*;
-use super::RawRewardSetEntry;
 use crate::burnchains::{Burnchain, PoxConstants};
 use crate::chainstate::burn::db::sortdb::SortitionDB;
-use crate::chainstate::burn::operations::*;
-use crate::chainstate::burn::{BlockSnapshot, ConsensusHash};
+use crate::chainstate::burn::BlockSnapshot;
 use crate::chainstate::stacks::address::{PoxAddress, PoxAddressType20, PoxAddressType32};
 use crate::chainstate::stacks::boot::pox_2_tests::{
     check_pox_print_event, check_stacking_state_invariants, generate_pox_clarity_value,
     get_partial_stacked, get_reward_cycle_total, get_reward_set_entries_at, get_stacking_state_pox,
     get_stacking_state_pox_2, get_stx_account_at, PoxPrintFields, StackingStateCheckData,
 };
-use crate::chainstate::stacks::boot::{
-    BOOT_CODE_COST_VOTING_TESTNET as BOOT_CODE_COST_VOTING, BOOT_CODE_POX_TESTNET, POX_2_NAME,
-    POX_3_NAME,
-};
-use crate::chainstate::stacks::db::{
-    MinerPaymentSchedule, StacksChainState, StacksHeaderInfo, MINER_REWARD_MATURITY,
-};
+use crate::chainstate::stacks::boot::{POX_2_NAME, POX_3_NAME};
 use crate::chainstate::stacks::events::TransactionOrigin;
-use crate::chainstate::stacks::index::marf::MarfConnection;
-use crate::chainstate::stacks::index::MarfTrieId;
-use crate::chainstate::stacks::tests::make_coinbase;
 use crate::chainstate::stacks::*;
-use crate::clarity_vm::clarity::{ClarityBlockConnection, Error as ClarityError};
-use crate::clarity_vm::database::marf::{MarfedKV, WritableMarfStore};
-use crate::clarity_vm::database::HeadersDBConn;
 use crate::core::*;
 use crate::net::test::{TestEventObserver, TestPeer};
 use crate::util_lib::boot::boot_code_id;
-use crate::util_lib::db::{DBConn, FromRow};
 
 const USTX_PER_HOLDER: u128 = 1_000_000;
 
@@ -1042,7 +1012,7 @@ fn delegate_stack_increase() {
     let bob = keys.pop().unwrap();
     let bob_address = key_to_stacks_addr(&bob);
     let bob_principal = PrincipalData::from(bob_address.clone());
-    let bob_pox_addr = make_pox_addr(AddressHashMode::SerializeP2PKH, bob_address.bytes().clone());
+    let bob_pox_addr = make_pox_addr(AddressHashMode::SerializeP2PKH, *bob_address.bytes());
     let mut alice_nonce = 0;
     let mut bob_nonce = 0;
 
@@ -2786,10 +2756,7 @@ fn delegate_extend_pox_3() {
         "delegate-stack-extend",
         vec![
             PrincipalData::from(bob_address.clone()).into(),
-            make_pox_addr(
-                AddressHashMode::SerializeP2PKH,
-                charlie_address.bytes().clone(),
-            ),
+            make_pox_addr(AddressHashMode::SerializeP2PKH, *charlie_address.bytes()),
             Value::UInt(1),
         ],
     );
@@ -2879,10 +2846,7 @@ fn delegate_extend_pox_3() {
         "delegate-stack-extend",
         vec![
             PrincipalData::from(bob_address.clone()).into(),
-            make_pox_addr(
-                AddressHashMode::SerializeP2PKH,
-                charlie_address.bytes().clone(),
-            ),
+            make_pox_addr(AddressHashMode::SerializeP2PKH, *charlie_address.bytes()),
             Value::UInt(3),
         ],
     );
@@ -3867,7 +3831,7 @@ fn stack_aggregation_increase() {
     let bob = keys.pop().unwrap();
     let bob_address = key_to_stacks_addr(&bob);
     let bob_principal = PrincipalData::from(bob_address.clone());
-    let bob_pox_addr = make_pox_addr(AddressHashMode::SerializeP2PKH, bob_address.bytes().clone());
+    let bob_pox_addr = make_pox_addr(AddressHashMode::SerializeP2PKH, *bob_address.bytes());
     let charlie = keys.pop().unwrap();
     let charlie_address = key_to_stacks_addr(&charlie);
     let charlie_pox_addr = make_pox_addr(
@@ -3877,7 +3841,7 @@ fn stack_aggregation_increase() {
     let dan = keys.pop().unwrap();
     let dan_address = key_to_stacks_addr(&dan);
     let dan_principal = PrincipalData::from(dan_address.clone());
-    let dan_pox_addr = make_pox_addr(AddressHashMode::SerializeP2PKH, dan_address.bytes().clone());
+    let dan_pox_addr = make_pox_addr(AddressHashMode::SerializeP2PKH, *dan_address.bytes());
     let alice_nonce = 0;
     let mut bob_nonce = 0;
     let mut charlie_nonce = 0;

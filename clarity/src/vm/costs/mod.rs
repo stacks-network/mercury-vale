@@ -417,6 +417,25 @@ pub enum CostErrors {
     ExecutionTimeExpired,
 }
 
+impl fmt::Display for CostErrors {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            CostErrors::CostComputationFailed(ref s) => write!(f, "Cost computation failed: {s}"),
+            CostErrors::CostOverflow => write!(f, "Cost overflow"),
+            CostErrors::CostBalanceExceeded(ref total, ref limit) => {
+                write!(f, "Cost balance exceeded: total {total}, limit {limit}")
+            }
+            CostErrors::MemoryBalanceExceeded(ref used, ref limit) => {
+                write!(f, "Memory balance exceeded: used {used}, limit {limit}")
+            }
+            CostErrors::CostContractLoadFailure => write!(f, "Failed to load cost contract"),
+            CostErrors::InterpreterFailure => write!(f, "Interpreter failure"),
+            CostErrors::Expect(ref s) => write!(f, "Expectation failed: {s}"),
+            CostErrors::ExecutionTimeExpired => write!(f, "Execution time expired"),
+        }
+    }
+}
+
 impl CostErrors {
     fn rejectable(&self) -> bool {
         matches!(self, CostErrors::InterpreterFailure | CostErrors::Expect(_))
@@ -857,7 +876,8 @@ impl LimitedCostTracker {
             | StacksEpochId::Epoch24
             | StacksEpochId::Epoch25
             | StacksEpochId::Epoch30
-            | StacksEpochId::Epoch31 => COSTS_3_NAME.to_string(),
+            | StacksEpochId::Epoch31
+            | StacksEpochId::Epoch32 => COSTS_3_NAME.to_string(),
         };
         Ok(result)
     }
@@ -929,7 +949,7 @@ impl TrackerData {
             if cost_function_ref.contract_id == boot_costs_id {
                 m.insert(
                     f,
-                    ClarityCostFunctionEvaluator::Default(cost_function_ref, *f, v),
+                    ClarityCostFunctionEvaluator::Default(cost_function_ref, f.clone(), v),
                 );
             } else {
                 m.insert(f, ClarityCostFunctionEvaluator::Clarity(cost_function_ref));

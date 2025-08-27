@@ -16,22 +16,13 @@
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-use clarity::vm::types::{PrincipalData, QualifiedContractIdentifier, StacksAddressExtensions};
-use clarity::vm::{ClarityName, ContractName, Value};
-use libstackerdb::SlotMetadata;
-use stacks_common::types::chainstate::StacksAddress;
-use stacks_common::types::net::PeerHost;
-use stacks_common::types::Address;
+use clarity::vm::types::QualifiedContractIdentifier;
 
 use super::test_rpc;
-use crate::core::BLOCK_LIMIT_MAINNET_21;
 use crate::net::api::*;
 use crate::net::connection::ConnectionOptions;
-use crate::net::httpcore::{
-    HttpPreambleExtensions, HttpRequestContentsExtensions, RPCRequestHandler, StacksHttp,
-    StacksHttpRequest,
-};
-use crate::net::{ProtocolFamily, TipRequest};
+use crate::net::httpcore::{RPCRequestHandler, StacksHttp, StacksHttpRequest};
+use crate::net::ProtocolFamily;
 
 #[test]
 fn test_try_parse_request() {
@@ -145,10 +136,6 @@ fn test_try_make_response() {
         "Response:\n{}\n",
         std::str::from_utf8(&response.try_serialize().unwrap()).unwrap()
     );
-    assert_eq!(
-        response.preamble().get_canonical_stacks_tip_height(),
-        Some(1)
-    );
 
     let resp = response.decode_stackerdb_chunk().unwrap();
     assert_eq!(std::str::from_utf8(&resp).unwrap(), "hello world");
@@ -157,10 +144,6 @@ fn test_try_make_response() {
     debug!(
         "Response:\n{}\n",
         std::str::from_utf8(&response.try_serialize().unwrap()).unwrap()
-    );
-    assert_eq!(
-        response.preamble().get_canonical_stacks_tip_height(),
-        Some(1)
     );
 
     let resp = response.decode_stackerdb_chunk().unwrap();

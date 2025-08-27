@@ -15,18 +15,15 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
+use std::net::TcpListener;
 use std::sync::mpsc::{channel, Receiver};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use std::{str, thread};
 
 use stacks_common::codec::StacksMessageCodec;
 use stacks_common::types::chainstate::{StacksAddress, StacksBlockId, StacksPrivateKey};
 use stacks_common::types::net::{PeerAddress, PeerHost};
 use stacks_common::types::StacksEpochId;
-use stacks_common::util::chunked_encoding::{
-    HttpChunkedTransferWriter, HttpChunkedTransferWriterState,
-};
 use stacks_common::util::hash::{hex_bytes, to_hex, Hash160};
 
 use crate::burnchains::Txid;
@@ -39,12 +36,11 @@ use crate::chainstate::stacks::{
 use crate::net::api::getneighbors::{RPCNeighbor, RPCNeighborsInfo};
 use crate::net::connection::ConnectionOptions;
 use crate::net::http::{
-    http_error_from_code_and_text, http_reason, HttpContentType, HttpErrorResponse,
-    HttpRequestContents, HttpRequestPreamble, HttpReservedHeader, HttpResponsePayload,
-    HttpResponsePreamble, HttpVersion, HTTP_PREAMBLE_MAX_NUM_HEADERS,
+    http_error_from_code_and_text, http_reason, HttpContentType, HttpRequestContents,
+    HttpRequestPreamble, HttpResponsePayload, HttpResponsePreamble, HttpVersion,
 };
 use crate::net::httpcore::{
-    send_http_request, HttpPreambleExtensions, HttpRequestContentsExtensions, StacksHttp,
+    send_http_request, HttpPreambleExtensions as _, HttpRequestContentsExtensions as _, StacksHttp,
     StacksHttpMessage, StacksHttpPreamble, StacksHttpRequest, StacksHttpResponse,
 };
 use crate::net::rpc::ConversationHttp;
@@ -1190,6 +1186,71 @@ fn parse_http_response(response: StacksHttpResponse) -> String {
         HttpResponsePayload::Bytes(bytes) => String::from_utf8_lossy(bytes.as_slice()).to_string(),
     };
     response_txt
+}
+
+#[test]
+fn test_http_response_is_success() {
+    // Test cases: (status_code, expected_is_success)
+    let test_cases = vec![
+        // Edge cases below 100
+        (99, false),
+        // Informational responses (1xx) - should be success
+        (100, true), // Continue
+        (101, true), // Switching Protocols
+        (102, true), // Processing
+        (199, true), // Any other 1xx
+        // Successful responses (2xx) - should be success
+        (200, true), // OK
+        (201, true), // Created
+        (202, true), // Accepted
+        (204, true), // No Content
+        (206, true), // Partial Content
+        (299, true), // Any other 2xx
+        // Redirection responses (3xx) - should be success
+        (300, true), // Multiple Choices
+        (301, true), // Moved Permanently
+        (302, true), // Found
+        (304, true), // Not Modified
+        (307, true), // Temporary Redirect
+        (308, true), // Permanent Redirect
+        (399, true), // Any other 3xx
+        // Client error responses (4xx) - should not be success
+        (400, false), // Bad Request
+        (401, false), // Unauthorized
+        (403, false), // Forbidden
+        (404, false), // Not Found
+        (418, false), // I'm a teapot
+        (429, false), // Too Many Requests
+        (499, false), // Any other 4xx
+        // Server error responses (5xx) - should not be success
+        (500, false), // Internal Server Error
+        (501, false), // Not Implemented
+        (502, false), // Bad Gateway
+        (503, false), // Service Unavailable
+        (504, false), // Gateway Timeout
+        (599, false), // Any other 5xx
+        // Edge cases above 5xx
+        (600, false),
+        (999, false),
+    ];
+
+    for (status_code, expected_is_success) in test_cases {
+        let preamble = HttpResponsePreamble::new(
+            HttpVersion::Http11,
+            status_code,
+            http_reason(status_code).to_string(),
+            Some(0), // content_length
+            HttpContentType::JSON,
+            true, // keep_alive
+        );
+
+        let actual_is_success = preamble.is_success();
+        assert_eq!(
+            actual_is_success, expected_is_success,
+            "Status code {} should have is_success() = {}, but got {}",
+            status_code, expected_is_success, actual_is_success
+        );
+    }
 }
 
 #[test]

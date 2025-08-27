@@ -28,6 +28,7 @@ use super::contexts::{TypeMap, TypingContext};
 use super::ContractAnalysis;
 pub use crate::vm::analysis::errors::{
     check_argument_count, check_arguments_at_least, CheckError, CheckErrors, CheckResult,
+    SyntaxBindingErrorType,
 };
 use crate::vm::analysis::AnalysisDatabase;
 use crate::vm::costs::cost_functions::ClarityCostFunction;
@@ -335,7 +336,7 @@ pub fn no_type() -> TypeSignature {
 }
 
 impl<'a, 'b> TypeChecker<'a, 'b> {
-    fn new(
+    pub fn new(
         db: &'a mut AnalysisDatabase<'b>,
         cost_track: LimitedCostTracker,
         build_type_map: bool,
@@ -555,8 +556,12 @@ impl<'a, 'b> TypeChecker<'a, 'b> {
         let function_name = function_name
             .match_atom()
             .ok_or(CheckErrors::BadFunctionName)?;
-        let args = parse_name_type_pairs::<()>(StacksEpochId::Epoch2_05, args, &mut ())
-            .map_err(|_| CheckErrors::BadSyntaxBinding)?;
+        let args = parse_name_type_pairs::<(), CheckError>(
+            StacksEpochId::Epoch2_05,
+            args,
+            SyntaxBindingErrorType::Eval,
+            &mut (),
+        )?;
 
         if self.function_return_tracker.is_some() {
             return Err(CheckErrors::Expects(

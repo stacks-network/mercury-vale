@@ -56,7 +56,6 @@ pub mod clarity;
 use std::collections::BTreeMap;
 
 use costs::CostErrors;
-use serde_json;
 use stacks_common::types::StacksEpochId;
 
 use self::analysis::ContractAnalysis;
@@ -77,6 +76,7 @@ pub use crate::vm::database::clarity_db::StacksEpoch;
 use crate::vm::errors::{
     CheckErrors, Error, InterpreterError, InterpreterResult as Result, RuntimeErrorType,
 };
+use crate::vm::events::StacksTransactionEvent;
 use crate::vm::functions::define::DefineResult;
 pub use crate::vm::functions::stx_transfer_consolidated;
 pub use crate::vm::representations::{
@@ -109,6 +109,7 @@ pub struct SnippetEvaluationResult {
 }
 
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum EvaluationResult {
     Contract(ContractEvaluationResult),
     Snippet(SnippetEvaluationResult),
@@ -117,12 +118,12 @@ pub enum EvaluationResult {
 #[derive(Debug, Clone)]
 pub struct ExecutionResult {
     pub result: EvaluationResult,
-    pub events: Vec<serde_json::Value>,
+    pub events: Vec<StacksTransactionEvent>,
     pub cost: Option<CostSynthesis>,
     pub diagnostics: Vec<Diagnostic>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct CostSynthesis {
     pub total: ExecutionCost,
     pub limit: ExecutionCost,
@@ -167,8 +168,7 @@ pub trait EvalHook {
 fn lookup_variable(name: &str, context: &LocalContext, env: &mut Environment) -> Result<Value> {
     if name.starts_with(char::is_numeric) || name.starts_with('\'') {
         Err(InterpreterError::BadSymbolicRepresentation(format!(
-            "Unexpected variable name: {}",
-            name
+            "Unexpected variable name: {name}"
         ))
         .into())
     } else if let Some(value) = variables::lookup_reserved_variable(name, context, env)? {
@@ -280,7 +280,7 @@ pub fn apply(
         env.call_stack.insert(&identifier, track_recursion);
         let mut resp = match function {
             CallableType::NativeFunction(_, function, cost_function) => {
-                runtime_cost(*cost_function, env, evaluated_args.len())
+                runtime_cost(cost_function.clone(), env, evaluated_args.len())
                     .map_err(Error::from)
                     .and_then(|_| function.apply(evaluated_args, env))
             }
@@ -290,7 +290,7 @@ pub fn apply(
                 } else {
                     evaluated_args.len() as u64
                 };
-                runtime_cost(*cost_function, env, cost_input)
+                runtime_cost(cost_function.clone(), env, cost_input)
                     .map_err(Error::from)
                     .and_then(|_| function.apply(evaluated_args, env))
             }
@@ -513,8 +513,7 @@ pub fn execute_on_network(program: &str, use_mainnet: bool) -> Result<Option<Val
 
     assert_eq!(
         epoch_200_result, epoch_205_result,
-        "Epoch 2.0 and 2.05 should have same execution result, but did not for program `{}`",
-        program
+        "Epoch 2.0 and 2.05 should have same execution result, but did not for program `{program}`"
     );
     epoch_205_result
 }

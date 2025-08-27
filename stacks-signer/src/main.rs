@@ -84,7 +84,7 @@ fn handle_list_chunks(args: StackerDBArgs) {
     let chunk_list = session.list_chunks().unwrap();
     let chunk_list_json = serde_json::to_string(&chunk_list).unwrap();
     let hexed_json = to_hex(chunk_list_json.as_bytes());
-    println!("{}", hexed_json);
+    println!("{hexed_json}");
 }
 
 fn handle_put_chunk(args: PutChunkArgs) {
@@ -111,7 +111,7 @@ fn handle_generate_stacking_signature(
 ) -> MessageSignature {
     let config = GlobalConfig::try_from(&args.config).unwrap();
 
-    let private_key = config.stacks_private_key;
+    let private_key = config.stacks_private_key.clone();
     let public_key = StacksPublicKey::from_private(&private_key);
     let pk_hex = to_hex(&public_key.to_bytes_compressed());
 
@@ -148,7 +148,7 @@ fn handle_generate_stacking_signature(
     };
 
     if do_print {
-        println!("{}", output_str);
+        println!("{output_str}");
     }
 
     signature
@@ -156,7 +156,7 @@ fn handle_generate_stacking_signature(
 
 fn handle_check_config(args: RunSignerArgs) {
     let config = GlobalConfig::try_from(&args.config).unwrap();
-    println!("Signer version: {}\nConfig: \n{}", *VERSION_STRING, config);
+    println!("Signer version: {}\nConfig: \n{config}", *VERSION_STRING);
 }
 
 fn handle_generate_vote(args: GenerateVoteArgs, do_print: bool) -> MessageSignature {
@@ -396,7 +396,7 @@ pub mod tests {
         let public_key = StacksPublicKey::from_private(&private_key);
         let args = GenerateVoteArgs {
             config: config_file.into(),
-            vote_info,
+            vote_info: vote_info.clone(),
         };
         let message_signature = handle_generate_vote(args, false);
         assert!(
@@ -421,9 +421,9 @@ pub mod tests {
         };
 
         let args = VerifyVoteArgs {
-            public_key,
+            public_key: public_key.clone(),
             signature: vote_info.sign(&private_key).unwrap(),
-            vote_info,
+            vote_info: vote_info.clone(),
         };
         let valid = handle_verify_vote(args, false);
         assert!(valid, "Vote should be valid");
@@ -431,13 +431,13 @@ pub mod tests {
         let args = VerifyVoteArgs {
             public_key: invalid_public_key,
             signature: vote_info.sign(&private_key).unwrap(), // Invalid corresponding public key
-            vote_info,
+            vote_info: vote_info.clone(),
         };
         let valid = handle_verify_vote(args, false);
         assert!(!valid, "Vote should be invalid");
 
         let args = VerifyVoteArgs {
-            public_key,
+            public_key: public_key.clone(),
             signature: vote_info.sign(&private_key).unwrap(),
             vote_info: VoteInfo {
                 vote: Vote::Yes, // Invalid vote

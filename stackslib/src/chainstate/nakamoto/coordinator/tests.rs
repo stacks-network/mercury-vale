@@ -20,36 +20,28 @@ use std::sync::Mutex;
 use clarity::consts::CHAIN_ID_TESTNET;
 use clarity::vm::clarity::ClarityConnection;
 use clarity::vm::costs::ExecutionCost;
-use clarity::vm::database::clarity_db::NullBurnStateDB;
 use clarity::vm::types::{PrincipalData, QualifiedContractIdentifier};
-use clarity::vm::{ClarityVersion, Value};
+use clarity::vm::ClarityVersion;
 use rand::prelude::SliceRandom;
-use rand::{thread_rng, Rng, RngCore};
+use rand::{thread_rng, Rng};
 use stacks_common::address::{AddressHashMode, C32_ADDRESS_VERSION_TESTNET_SINGLESIG};
 use stacks_common::bitvec::BitVec;
-use stacks_common::consts::{
-    FIRST_BURNCHAIN_CONSENSUS_HASH, FIRST_STACKS_BLOCK_HASH, SIGNER_SLOTS_PER_USER,
-};
+use stacks_common::consts::{FIRST_BURNCHAIN_CONSENSUS_HASH, FIRST_STACKS_BLOCK_HASH};
 use stacks_common::types::chainstate::{
     BurnchainHeaderHash, StacksAddress, StacksBlockId, StacksPrivateKey, StacksPublicKey,
 };
-use stacks_common::types::{Address, StacksEpoch, StacksEpochId, StacksPublicKeyBuffer};
+use stacks_common::types::{Address, StacksEpoch, StacksPublicKeyBuffer};
 use stacks_common::util::hash::{to_hex, Hash160};
-use stacks_common::util::secp256k1::Secp256k1PrivateKey;
-use stacks_common::util::vrf::VRFProof;
 
 use crate::burnchains::tests::TestMiner;
-use crate::burnchains::{PoxConstants, Txid};
+use crate::burnchains::Txid;
 use crate::chainstate::burn::db::sortdb::{SortitionDB, SortitionHandle};
 use crate::chainstate::burn::operations::{
-    BlockstackOperationType, DelegateStxOp, LeaderBlockCommitOp, StackStxOp, TransferStxOp,
-    VoteForAggregateKeyOp,
+    BlockstackOperationType, DelegateStxOp, StackStxOp, TransferStxOp, VoteForAggregateKeyOp,
 };
-use crate::chainstate::coordinator::tests::{p2pkh_from, pox_addr_from};
-use crate::chainstate::nakamoto::coordinator::load_nakamoto_reward_set;
+use crate::chainstate::coordinator::tests::p2pkh_from;
 use crate::chainstate::nakamoto::fault_injection::*;
 use crate::chainstate::nakamoto::miner::NakamotoBlockBuilder;
-use crate::chainstate::nakamoto::signer_set::NakamotoSigners;
 use crate::chainstate::nakamoto::test_signers::TestSigners;
 use crate::chainstate::nakamoto::tests::get_account;
 use crate::chainstate::nakamoto::tests::node::TestStacker;
@@ -57,23 +49,20 @@ use crate::chainstate::nakamoto::{
     NakamotoBlock, NakamotoBlockObtainMethod, NakamotoChainState, NakamotoStagingBlocksConnRef,
 };
 use crate::chainstate::stacks::address::PoxAddress;
-use crate::chainstate::stacks::boot::pox_4_tests::{get_stacking_minimum, get_tip};
-use crate::chainstate::stacks::boot::signers_tests::{readonly_call, readonly_call_with_sortdb};
 use crate::chainstate::stacks::boot::test::{
-    key_to_stacks_addr, make_pox_4_lockup, make_signer_key_signature, with_sortdb,
+    key_to_stacks_addr, make_pox_4_lockup, make_signer_key_signature,
 };
-use crate::chainstate::stacks::boot::{MINERS_NAME, SIGNERS_NAME};
-use crate::chainstate::stacks::db::{MinerPaymentTxFees, StacksAccount, StacksChainState};
+use crate::chainstate::stacks::boot::MINERS_NAME;
+use crate::chainstate::stacks::db::{MinerPaymentTxFees, StacksChainState};
 use crate::chainstate::stacks::events::TransactionOrigin;
 use crate::chainstate::stacks::{
-    CoinbasePayload, Error as ChainstateError, StacksTransaction, StacksTransactionSigner,
-    TenureChangeCause, TokenTransferMemo, TransactionAnchorMode, TransactionAuth,
-    TransactionPayload, TransactionSmartContract, TransactionVersion,
+    Error as ChainstateError, StacksTransaction, StacksTransactionSigner, TenureChangeCause,
+    TokenTransferMemo, TransactionAnchorMode, TransactionAuth, TransactionPayload,
+    TransactionSmartContract, TransactionVersion,
 };
 use crate::clarity::vm::types::StacksAddressExtensions;
 use crate::core::StacksEpochExtension;
 use crate::net::relay::{BlockAcceptResponse, Relayer};
-use crate::net::stackerdb::StackerDBConfig;
 use crate::net::test::{TestEventObserver, TestPeer, TestPeerConfig};
 use crate::net::tests::NakamotoBootPlan;
 use crate::stacks_common::codec::StacksMessageCodec;
@@ -460,7 +449,7 @@ fn test_simple_nakamoto_coordinator_1_tenure_10_blocks() {
     let (mut test_signers, test_stackers) = TestStacker::common_signing_set();
     let mut peer = boot_nakamoto(
         function_name!(),
-        vec![(addr.into(), 100_000_000)],
+        vec![(addr.clone().into(), 100_000_000)],
         &mut test_signers,
         &test_stackers,
         None,
@@ -834,7 +823,7 @@ fn block_descendant() {
     let mut boot_plan = NakamotoBootPlan::new(function_name!())
         .with_test_stackers(test_stackers)
         .with_test_signers(test_signers)
-        .with_private_key(private_key);
+        .with_private_key(private_key.clone());
     boot_plan.pox_constants = pox_constants;
 
     let mut peer = boot_plan.boot_into_nakamoto_peer(vec![], None);
@@ -929,7 +918,7 @@ fn block_info_tests(use_primary_testnet: bool) {
         NakamotoBootPlan::new(&format!("{}.{use_primary_testnet}", function_name!()))
             .with_test_stackers(test_stackers)
             .with_test_signers(test_signers)
-            .with_private_key(private_key)
+            .with_private_key(private_key.clone())
             .with_network_id(chain_id);
     boot_plan.pox_constants = pox_constants;
 
@@ -1352,7 +1341,7 @@ fn pox_treatment() {
     let mut boot_plan = NakamotoBootPlan::new(function_name!())
         .with_test_stackers(test_stackers.clone())
         .with_test_signers(test_signers)
-        .with_private_key(private_key);
+        .with_private_key(private_key.clone());
     boot_plan.pox_constants = pox_constants;
 
     let mut peer = boot_plan.boot_into_nakamoto_peer(vec![], None);
@@ -1605,7 +1594,7 @@ fn transactions_indexing() {
     let mut boot_plan = NakamotoBootPlan::new(function_name!())
         .with_test_stackers(test_stackers.clone())
         .with_test_signers(test_signers.clone())
-        .with_private_key(private_key)
+        .with_private_key(private_key.clone())
         .with_txindex(true);
     boot_plan.pox_constants = pox_constants;
 
@@ -1670,7 +1659,7 @@ fn transactions_not_indexing() {
     let mut boot_plan = NakamotoBootPlan::new(function_name!())
         .with_test_stackers(test_stackers.clone())
         .with_test_signers(test_signers.clone())
-        .with_private_key(private_key)
+        .with_private_key(private_key.clone())
         .with_txindex(false);
     boot_plan.pox_constants = pox_constants;
 
@@ -1719,7 +1708,7 @@ fn test_nakamoto_chainstate_getters() {
     let (mut test_signers, test_stackers) = TestStacker::common_signing_set();
     let mut peer = boot_nakamoto(
         function_name!(),
-        vec![(addr.into(), 100_000_000)],
+        vec![(addr.clone().into(), 100_000_000)],
         &mut test_signers,
         &test_stackers,
         None,
@@ -2207,7 +2196,7 @@ pub fn simple_nakamoto_coordinator_10_tenures_10_sortitions<'a>() -> TestPeer<'a
     let (mut test_signers, test_stackers) = TestStacker::common_signing_set();
     let mut peer = boot_nakamoto(
         function_name!(),
-        vec![(addr.into(), 100_000_000)],
+        vec![(addr.clone().into(), 100_000_000)],
         &mut test_signers,
         &test_stackers,
         None,
@@ -2552,7 +2541,7 @@ pub fn simple_nakamoto_coordinator_2_tenures_3_sortitions<'a>() -> TestPeer<'a> 
     let (mut test_signers, test_stackers) = TestStacker::common_signing_set();
     let mut peer = boot_nakamoto(
         function_name!(),
-        vec![(addr.into(), 100_000_000)],
+        vec![(addr.clone().into(), 100_000_000)],
         &mut test_signers,
         &test_stackers,
         None,
@@ -2905,7 +2894,7 @@ pub fn simple_nakamoto_coordinator_10_extended_tenures_10_sortitions() -> TestPe
     ]);
     let mut peer = boot_nakamoto(
         function_name!(),
-        vec![(addr.into(), 100_000_000)],
+        vec![(addr.clone().into(), 100_000_000)],
         &mut test_signers,
         &test_stackers,
         None,
@@ -3223,7 +3212,7 @@ fn process_next_nakamoto_block_deadlock() {
     let mut boot_plan = NakamotoBootPlan::new(function_name!())
         .with_test_stackers(test_stackers)
         .with_test_signers(test_signers)
-        .with_private_key(private_key);
+        .with_private_key(private_key.clone());
     boot_plan.pox_constants = pox_constants;
 
     info!("Creating peer");
@@ -3312,7 +3301,7 @@ fn test_stacks_on_burnchain_ops() {
     let observer = TestEventObserver::new();
     let mut peer = boot_nakamoto(
         function_name!(),
-        vec![(addr.into(), 100_000_000)],
+        vec![(addr.clone().into(), 100_000_000)],
         &mut test_signers,
         &test_stackers,
         Some(&observer),

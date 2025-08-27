@@ -115,7 +115,7 @@ impl StacksMessageCodec for ClarityName {
 
         // must decode to a clarity name
         let name = ClarityName::try_from(s).map_err(|e| {
-            codec_error::DeserializeError(format!("Failed to parse Clarity name: {:?}", e))
+            codec_error::DeserializeError(format!("Failed to parse Clarity name: {e:?}"))
         })?;
         Ok(name)
     }
@@ -144,8 +144,7 @@ impl StacksMessageCodec for ContractName {
             || (len_byte as usize) > CONTRACT_MAX_NAME_LENGTH
         {
             return Err(codec_error::DeserializeError(format!(
-                "Failed to deserialize contract name: too short or too long: {}",
-                len_byte
+                "Failed to deserialize contract name: too short or too long: {len_byte}"
             )));
         }
         let mut bytes = vec![0u8; len_byte as usize];
@@ -159,7 +158,7 @@ impl StacksMessageCodec for ContractName {
         })?;
 
         let name = ContractName::try_from(s).map_err(|e| {
-            codec_error::DeserializeError(format!("Failed to parse Contract name: {:?}", e))
+            codec_error::DeserializeError(format!("Failed to parse Contract name: {e:?}"))
         })?;
         Ok(name)
     }
@@ -454,13 +453,17 @@ pub struct SymbolicExpression {
     pub id: u64,
 
     #[cfg(feature = "developer-mode")]
+    #[serde(default)]
     pub span: Span,
 
     #[cfg(feature = "developer-mode")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pre_comments: Vec<(String, Span)>,
     #[cfg(feature = "developer-mode")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub end_line_comment: Option<String>,
     #[cfg(feature = "developer-mode")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub post_comments: Vec<(String, Span)>,
 }
 
@@ -619,15 +622,29 @@ impl SymbolicExpression {
             None
         }
     }
+
+    /// Encode this SymbolicExpression as a String suitable for logging an error (such as in
+    /// CheckErrors).  The `developer-mode` feature includes the `span`.
+    #[cfg(feature = "developer-mode")]
+    pub fn as_error_string(&self) -> String {
+        format!("{} at {:?}", &self.expr, &self.span)
+    }
+
+    /// Encode this SymbolicExpression as a String suitable for logging an error (such as in
+    /// CheckErrors).
+    #[cfg(not(feature = "developer-mode"))]
+    pub fn as_error_string(&self) -> String {
+        format!("{}", &self.expr)
+    }
 }
 
-impl fmt::Display for SymbolicExpression {
+impl fmt::Display for SymbolicExpressionType {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self.expr {
+        match self {
             SymbolicExpressionType::List(ref list) => {
                 write!(f, "(")?;
                 for item in list.iter() {
-                    write!(f, " {}", item)?;
+                    write!(f, " {item}")?;
                 }
                 write!(f, " )")?;
             }
@@ -636,21 +653,26 @@ impl fmt::Display for SymbolicExpression {
             }
             SymbolicExpressionType::AtomValue(ref value)
             | SymbolicExpressionType::LiteralValue(ref value) => {
-                write!(f, "{}", value)?;
+                write!(f, "{value}")?;
             }
             SymbolicExpressionType::TraitReference(ref value, _) => {
                 write!(f, "<{}>", &**value)?;
             }
             SymbolicExpressionType::Field(ref value) => {
-                write!(f, "<{}>", value)?;
+                write!(f, "<{value}>")?;
             }
-        };
-
+        }
         Ok(())
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+impl fmt::Display for SymbolicExpression {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}", &self.expr)
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct Span {
     pub start_line: u32,
     pub start_column: u32,
@@ -666,12 +688,7 @@ impl Span {
         end_column: 0,
     };
 
-    pub fn zero() -> Span {
-        Span {
-            start_line: 0,
-            start_column: 0,
-            end_line: 0,
-            end_column: 0,
-        }
+    pub fn zero() -> Self {
+        Self::default()
     }
 }

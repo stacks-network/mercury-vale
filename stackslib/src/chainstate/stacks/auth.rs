@@ -14,21 +14,19 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use std::io;
-use std::io::prelude::*;
 use std::io::{Read, Write};
 
-use stacks_common::address::{public_keys_to_address_hash, AddressHashMode};
+use stacks_common::address::AddressHashMode;
 use stacks_common::codec::{
     read_next, write_next, Error as codec_error, StacksMessageCodec, MAX_MESSAGE_LEN,
 };
 use stacks_common::types::chainstate::StacksAddress;
 use stacks_common::types::{StacksEpochId, StacksPublicKeyBuffer};
-use stacks_common::util::hash::{to_hex, Hash160, Sha512Trunc256Sum};
-use stacks_common::util::retry::{BoundReader, RetryReader};
+use stacks_common::util::hash::Hash160;
+use stacks_common::util::retry::BoundReader;
 use stacks_common::util::secp256k1::{MessageSignature, MESSAGE_SIGNATURE_ENCODED_SIZE};
 
-use crate::burnchains::{PrivateKey, PublicKey, Txid};
+use crate::burnchains::{PrivateKey, Txid};
 use crate::chainstate::stacks::{
     Error, MultisigHashMode, MultisigSpendingCondition, OrderIndependentMultisigHashMode,
     OrderIndependentMultisigSpendingCondition, SinglesigHashMode, SinglesigSpendingCondition,
@@ -38,7 +36,7 @@ use crate::chainstate::stacks::{
     C32_ADDRESS_VERSION_MAINNET_SINGLESIG, C32_ADDRESS_VERSION_TESTNET_MULTISIG,
     C32_ADDRESS_VERSION_TESTNET_SINGLESIG,
 };
-use crate::net::{Error as net_error, STACKS_PUBLIC_KEY_ENCODED_SIZE};
+use crate::net::Error as net_error;
 
 impl StacksMessageCodec for TransactionAuthField {
     fn consensus_serialize<W: Write>(&self, fd: &mut W) -> Result<(), codec_error> {
@@ -1387,12 +1385,9 @@ impl TransactionAuth {
 #[rustfmt::skip]
 #[cfg(test)]
 mod test {
-    use stacks_common::types::StacksEpochId::Epoch30;
     use super::*;
-    use crate::chainstate::stacks::{StacksPublicKey as PubKey, *};
+    use crate::chainstate::stacks::StacksPublicKey as PubKey;
     use crate::net::codec::test::check_codec_and_corruption;
-    use crate::net::codec::*;
-    use crate::net::*;
 
     #[test]
     fn tx_stacks_spending_condition_p2pkh() {
@@ -2401,33 +2396,34 @@ mod test {
         tx_auth_check_all_epochs(auth_p2wpkh, None);
         tx_auth_check_all_epochs(auth_sponsored_p2wpkh, None);
 
-        let auth_p2sh = TransactionAuth::from_p2sh(&[privk_1, privk_2], 2).unwrap();
+        let privks = [privk_1.clone(), privk_2.clone()];
+        let auth_p2sh = TransactionAuth::from_p2sh(&privks, 2).unwrap();
         let auth_sponsored_p2sh = auth_p2sh.clone().into_sponsored(
-            TransactionAuth::from_p2sh(&[privk_1, privk_2], 2).unwrap()
+            TransactionAuth::from_p2sh(&privks, 2).unwrap()
         ).unwrap();
 
         tx_auth_check_all_epochs(auth_p2sh, None);
         tx_auth_check_all_epochs(auth_sponsored_p2sh, None);
 
-        let auth_p2wsh = TransactionAuth::from_p2wsh(&[privk_1, privk_2], 2).unwrap();
+        let auth_p2wsh = TransactionAuth::from_p2wsh(&privks, 2).unwrap();
         let auth_sponsored_p2wsh = auth_p2wsh.clone().into_sponsored(
-            TransactionAuth::from_p2wsh(&[privk_1, privk_2], 2).unwrap()
+            TransactionAuth::from_p2wsh(&privks, 2).unwrap()
         ).unwrap();
 
         tx_auth_check_all_epochs(auth_p2wsh, None);
         tx_auth_check_all_epochs(auth_sponsored_p2wsh, None);
 
-        let auth_order_independent_p2sh = TransactionAuth::from_order_independent_p2sh(&[privk_1, privk_2], 2).unwrap();
+        let auth_order_independent_p2sh = TransactionAuth::from_order_independent_p2sh(&privks, 2).unwrap();
         let auth_sponsored_order_independent_p2sh = auth_order_independent_p2sh.clone().into_sponsored(
-            TransactionAuth::from_order_independent_p2sh(&[privk_1, privk_2], 2).unwrap()
+            TransactionAuth::from_order_independent_p2sh(&privks, 2).unwrap()
         ).unwrap();
 
         tx_auth_check_all_epochs(auth_order_independent_p2sh, Some(StacksEpochId::Epoch30));
         tx_auth_check_all_epochs(auth_sponsored_order_independent_p2sh, Some(StacksEpochId::Epoch30));
 
-        let auth_order_independent_p2wsh = TransactionAuth::from_order_independent_p2wsh(&[privk_1, privk_2], 2).unwrap();
+        let auth_order_independent_p2wsh = TransactionAuth::from_order_independent_p2wsh(&privks, 2).unwrap();
         let auth_sponsored_order_independent_p2wsh = auth_order_independent_p2wsh.clone().into_sponsored(
-            TransactionAuth::from_order_independent_p2wsh(&[privk_1, privk_2], 2).unwrap()
+            TransactionAuth::from_order_independent_p2wsh(&privks, 2).unwrap()
         ).unwrap();
 
         tx_auth_check_all_epochs(auth_order_independent_p2wsh, Some(StacksEpochId::Epoch30));
